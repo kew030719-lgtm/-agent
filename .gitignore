@@ -1,0 +1,15 @@
+.venv/
+.env
+.env.*
+!.env.example
+.idea/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+data/*.db*
+data/knowledge/
+data/milvus/
+data/company_simulation/
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
