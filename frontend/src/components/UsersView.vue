@@ -2,10 +2,30 @@
 import { computed, onMounted, ref } from "vue";
 import { Plus, RefreshCw, Search, ShieldCheck, X } from "@lucide/vue";
 import { api, errorText } from "../api";
-import type { ManagedUser, RoleOption } from "../types";
+import type { ManagedUser, OrganizationOptions, RoleOption } from "../types";
 
 const users = ref<ManagedUser[]>([]);
 const roles = ref<RoleOption[]>([]);
+const organization = ref<OrganizationOptions>({ departments: [], job_levels: [] });
+const editing = ref(false);
+const displayName = ref("");
+const departmentId = ref<number | null>(null);
+const jobLevel = ref("employee");
+const managerUsername = ref<string | null>(null);
+const departmentFilter = ref<number | null>(null);
+const newDepartment = ref("");
+const emit = defineEmits<{ saved: [] }>();
+const levelNames: Record<string, string> = {
+  employee: "普通员工", team_lead: "组长", department_manager: "部门经理",
+  general_manager: "总经理", chairman: "董事长",
+};
+const managers = computed(() => {
+  const ranks = organization.value.job_levels.map((item) => item.value);
+  return users.value.filter((item) => item.enabled && item.username !== username.value &&
+    ranks.indexOf(item.job_level) > ranks.indexOf(jobLevel.value) &&
+    (["general_manager", "chairman"].includes(item.job_level) ||
+      (departmentId.value !== null && item.department_id === departmentId.value)));
+});
 const loading = ref(true),
   saving = ref(false),
   showCreate = ref(false);
@@ -18,11 +38,11 @@ const username = ref(""),
   confirmation = ref(""),
   role = ref("employee");
 const roleNames: Record<string, string> = {
-  employee: "普通员工",
-  hr: "人事",
-  it: "IT",
-  finance: "财务",
-  admin: "管理员",
+  employee: "基础权限",
+  hr: "人事业务权限",
+  it: "IT 业务权限",
+  finance: "财务业务权限",
+  admin: "系统管理员",
 };
 const roleDescriptions: Record<string, string> = {
   employee: "查询公共知识和本人余额，提交工单与报销，查询和预订会议室。",
@@ -33,7 +53,9 @@ const roleDescriptions: Record<string, string> = {
 };
 const filtered = computed(() =>
   users.value.filter((user) =>
-    user.username.toLowerCase().includes(search.value.toLowerCase()),
+    (departmentFilter.value === null || user.department_id === departmentFilter.value) &&
+    [user.username, user.display_name, user.department_name || "", levelNames[user.job_level]]
+      .join(" ").toLowerCase().includes(search.value.toLowerCase()),
   ),
 );
 const selectedRole = computed(() =>
@@ -44,9 +66,10 @@ async function load(): Promise<void> {
   loading.value = true;
   error.value = "";
   try {
-    [users.value, roles.value] = await Promise.all([
+    [users.value, roles.value, organization.value] = await Promise.all([
       api<ManagedUser[]>("/users"),
       api<RoleOption[]>("/users/roles"),
+      api<OrganizationOptions>("/users/organization"),
     ]);
   } catch (err) {
     error.value = errorText(err);
@@ -56,6 +79,11 @@ async function load(): Promise<void> {
 }
 
 function openCreate(): void {
+  editing.value = false;
+  displayName.value = "";
+  departmentId.value = null;
+  jobLevel.value = "employee";
+  managerUsername.value = null;
   username.value = "";
   password.value = "";
   confirmation.value = "";
@@ -63,6 +91,32 @@ function openCreate(): void {
   formError.value = "";
   notice.value = "";
   showCreate.value = true;
+}
+
+function openEdit(item: ManagedUser): void {
+  openCreate();
+  editing.value = true;
+  username.value = item.username;
+  role.value = item.role;
+  displayName.value = item.display_name;
+  departmentId.value = item.department_id;
+  jobLevel.value = item.job_level;
+  managerUsername.value = item.manager_username;
+}
+
+async function addDepartment(): Promise<void> {
+  if (saving.value || !newDepartment.value.trim()) return;
+  saving.value = true;
+  formError.value = "";
+  try {
+    const department = await api<{ id: number; name: string }>("/users/departments", {
+      method: "POST", body: JSON.stringify({ name: newDepartment.value.trim() }),
+    });
+    organization.value.departments.push(department);
+    departmentId.value = department.id;
+    newDepartment.value = "";
+  } catch (err) { formError.value = errorText(err); }
+  finally { saving.value = false; }
 }
 
 function closeCreate(): void {
@@ -78,24 +132,26 @@ async function createUser(): Promise<void> {
     formError.value = "请输入账号名。";
     return;
   }
-  if (password.value !== confirmation.value) {
+  if (!editing.value && password.value !== confirmation.value) {
     formError.value = "两次输入的密码不一致。";
     return;
   }
   saving.value = true;
   try {
-    const created = await api<ManagedUser>("/users", {
+    const fields = {
+      display_name: displayName.value.trim(), department_id: departmentId.value,
+      job_level: jobLevel.value, manager_username: managerUsername.value, role: role.value,
+    };
+    const created = await api<ManagedUser>(editing.value ? `/users/${encodeURIComponent(username.value)}/profile` : "/users", {
       method: "POST",
-      body: JSON.stringify({
-        username: username.value.trim(),
-        password: password.value,
-        role: role.value,
+      body: JSON.stringify(editing.value ? fields : {
+        ...fields, username: username.value.trim(), password: password.value,
       }),
     });
-    users.value = [...users.value, created].sort((a, b) =>
-      a.username.localeCompare(b.username),
-    );
-    notice.value = `账号「${created.username}」已创建，角色为${roleNames[created.role]}，现在可以登录。`;
+    users.value = [...users.value.filter((item) => item.username !== created.username), created]
+      .sort((a, b) => a.username.localeCompare(b.username));
+    notice.value = `账号「${created.username}」的${editing.value ? "组织与权限信息已更新" : "档案已创建，可以登录"}。`;
+    emit("saved");
     closeCreate();
   } catch (err) {
     formError.value = errorText(err);
@@ -111,9 +167,8 @@ onMounted(load);
   <section class="page-content">
     <div class="page-heading">
       <div>
-        <span class="eyebrow">TEAM & ACCESS</span>
-        <h1>让每位同事，进入工作空间。</h1>
-        <p class="muted">创建员工账号，按工作职责分配角色与访问权限。</p>
+        <h1>员工与组织</h1>
+        <p class="muted">管理姓名、部门、职级和直属上级，单独分配系统访问权限。</p>
       </div>
       <button
         class="primary"
@@ -131,11 +186,15 @@ onMounted(load);
           >用户列表 <span class="count">{{ users.length }}</span></strong
         >
         <div class="row-actions">
+          <select v-model="departmentFilter" aria-label="按部门筛选">
+            <option :value="null">全部部门</option>
+            <option v-for="dep in organization.departments" :key="dep.id" :value="dep.id">{{ dep.name }}</option>
+          </select>
           <div class="search-field">
             <Search :size="16" /><input
               v-model="search"
               aria-label="搜索用户"
-              placeholder="搜索账号…"
+              placeholder="搜索账号、姓名、职级…"
             />
           </div>
           <button
@@ -155,8 +214,8 @@ onMounted(load);
           <thead>
             <tr>
               <th>员工账号</th>
-              <th>角色</th>
-              <th>状态</th>
+              <th>部门</th><th>职级</th><th>直属上级</th><th>权限角色</th>
+              <th>状态</th><th>操作</th>
             </tr>
           </thead>
           <tbody>
@@ -166,22 +225,26 @@ onMounted(load);
                   <span class="avatar">{{
                     item.username.slice(0, 1).toUpperCase()
                   }}</span
-                  ><strong>{{ item.username }}</strong>
+                  ><span><strong>{{ item.display_name || item.username }}</strong><small class="account-name">{{ item.username }}</small></span>
                 </div>
               </td>
+              <td>{{ item.department_name || "未分配" }}</td>
+              <td>{{ levelNames[item.job_level] || item.job_level }}</td>
+              <td>{{ item.manager_username || "未分配" }}</td>
               <td>{{ roleNames[item.role] || item.role }}</td>
               <td>
                 <span class="tag" :class="item.enabled ? 'green' : 'amber'">{{
                   item.enabled ? "已启用" : "已停用"
                 }}</span>
               </td>
+            <td><button class="secondary" @click="openEdit(item)">编辑</button></td>
             </tr>
           </tbody>
         </table>
       </div>
     </div>
     <p class="page-footnote">
-      仅有用户管理权限的账号可以创建用户。新用户可直接使用初始密码登录，权限由后端按角色校验。
+      汇报关系：普通员工 → 组长 → 部门经理 → 总经理 → 董事长，可按实际情况跨级汇报。职级与权限角色独立设置，审批流尚未自动接入此层级。
     </p>
     <div v-if="showCreate" class="modal-backdrop">
       <form
@@ -192,7 +255,7 @@ onMounted(load);
         @submit.prevent="createUser"
       >
         <div class="section-title">
-          <h2 id="create-user-title">创建一个新账号</h2>
+          <h2 id="create-user-title">{{ editing ? "编辑员工档案" : "创建一个新账号" }}</h2>
           <button
             class="icon-button"
             type="button"
@@ -210,10 +273,27 @@ onMounted(load);
             placeholder="例如：zhangsan"
             required
             maxlength="100"
-            :disabled="saving"
+            :disabled="saving || editing"
         /></label>
+        <label>姓名<input v-model="displayName" maxlength="100" :disabled="saving" placeholder="员工姓名" /></label>
+        <label>所属部门<select v-model="departmentId" :disabled="saving">
+          <option :value="null">未分配</option>
+          <option v-for="dep in organization.departments" :key="dep.id" :value="dep.id">{{ dep.name }}</option>
+        </select></label>
+        <div class="row-actions">
+          <input v-model="newDepartment" aria-label="新部门名称" placeholder="新部门名称" maxlength="50" :disabled="saving" />
+          <button class="secondary" type="button" :disabled="saving || !newDepartment.trim()" @click="addDepartment">新增部门</button>
+        </div>
+        <label>岗位职级<select v-model="jobLevel" :disabled="saving">
+          <option v-for="level in organization.job_levels" :key="level.value" :value="level.value">{{ level.label }}</option>
+        </select></label>
+        <label>直属上级<select v-model="managerUsername" :disabled="saving">
+          <option :value="null">未分配 / 无上级</option>
+          <option v-if="managerUsername && !managers.some((item) => item.username === managerUsername)" :value="managerUsername" disabled>当前上级不符合新组织关系，请重新选择</option>
+          <option v-for="item in managers" :key="item.username" :value="item.username">{{ item.display_name || item.username }} · {{ levelNames[item.job_level] }} ({{ item.username }})</option>
+        </select></label>
         <label
-          >角色<select v-model="role" :disabled="saving">
+          >权限角色<select v-model="role" :disabled="saving">
             <option
               v-for="option in roles"
               :key="option.role"
@@ -232,7 +312,7 @@ onMounted(load);
             ></span
           >
         </div>
-        <label
+        <label v-if="!editing"
           >初始密码<input
             v-model="password"
             type="password"
@@ -243,7 +323,7 @@ onMounted(load);
             required
             :disabled="saving"
         /></label>
-        <label
+        <label v-if="!editing"
           >确认密码<input
             v-model="confirmation"
             type="password"
@@ -266,7 +346,7 @@ onMounted(load);
           >
             取消</button
           ><button class="primary" :disabled="saving || !roles.length">
-            {{ saving ? "正在创建…" : "创建账号" }}
+            {{ saving ? "正在保存…" : editing ? "保存修改" : "创建账号" }}
           </button>
         </div>
       </form>
@@ -275,6 +355,9 @@ onMounted(load);
 </template>
 
 <style scoped>
+.account-name { display: block; color: var(--muted); margin-top: 4px; }
+.row-actions select { max-width: 150px; }
+td { white-space: nowrap; }
 .user-create-modal {
   max-height: calc(100dvh - 40px);
   overflow-y: auto;
@@ -289,8 +372,8 @@ onMounted(load);
   display: flex;
   align-items: flex-start;
   gap: 9px;
-  color: #758764;
-  background: #f3f6ec;
+  color: var(--muted);
+  background: var(--surface);
   padding: 12px;
   border-radius: 8px;
   font-size: 11px;
@@ -302,7 +385,7 @@ onMounted(load);
 }
 .role-description small {
   display: block;
-  color: #91a07f;
+  color: var(--muted);
   margin-top: 4px;
 }
 .user-create-modal .notice {

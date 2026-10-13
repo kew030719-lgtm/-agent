@@ -17,12 +17,16 @@ class AssistantInput(TypedDict):
     question: str
     pending_ticket: NotRequired[str]
     meeting_context: NotRequired[str]
+    pending_handoff: NotRequired[str]
 
 
 class AssistantState(AssistantInput, total=False):
     domain: str
     answer: str
     meeting_request: dict[str, object] | None
+
+
+HANDOFF_WORDS = frozenset({"转人工", "确认转人工", "帮我转人工", "请转人工", "联系人工", "人工客服"})
 
 
 CONFIRM_WORDS = frozenset({"确认", "确认报修", "需要", "要"})
@@ -112,6 +116,9 @@ def build_graph(
         text = state["question"].strip()
         pending = state.get("pending_ticket", "")
 
+        if text in HANDOFF_WORDS or text.startswith(("转人工：", "转人工:")) or (state.get("pending_handoff") and text == "取消转人工"):
+            return {"domain": "human", "pending_ticket": ""}
+
         profile_domain = local_profile_domain(text)
         if profile_domain is not None:
             return {"domain": profile_domain, "pending_ticket": ""}
@@ -145,6 +152,8 @@ def build_graph(
     def route_node(state: AssistantState) -> dict[str, object]:
         result = choose_route(state)
         result.setdefault("meeting_request", None)
+        if result["domain"] != "human":
+            result["pending_handoff"] = ""
         if result["domain"] != "meeting":
             result["meeting_context"] = ""
         return result
@@ -209,22 +218,26 @@ def build_graph(
             answer = answer_knowledge_fn(state["user"], state["question"])
             if answer:
                 return {"answer": answer}
-        handoff_id = create_handoff_fn(
-            state["user"],
-            state["question"],
-            "知识库没有足够可靠的依据",
-        )
         return {
-            "answer": f"知识库没有足够可靠的依据，问题已转人工，待办 #{handoff_id} 已创建。"
+            "answer": "当前可访问的资料还不足以回答这个问题。你可以补充产品名称或具体问题；需要人工确认的话，请回复“转人工”。",
+            "pending_handoff": state["question"],
         }
 
     def human_node(state: AssistantState) -> dict[str, str]:
-        handoff_id = create_handoff_fn(
-            state["user"],
-            state["question"],
-            "路由判定需人工处理",
-        )
-        return {"answer": f"已转人工，待办 #{handoff_id} 已创建。"}
+        text = state["question"].strip()
+        if text == "取消转人工":
+            return {"domain": "clarify", "answer": "已取消转人工。", "pending_handoff": ""}
+        pending = state.get("pending_handoff", "")
+        explicit = text in HANDOFF_WORDS
+        if text.startswith(("转人工：", "转人工:")):
+            pending = text[4:].strip()
+            explicit = True
+        if explicit and pending:
+            handoff_id = create_handoff_fn(state["user"], pending, "用户明确请求人工协助")
+            return {"answer": f"已转人工，待办 #{handoff_id} 已创建。", "pending_handoff": ""}
+        if explicit:
+            return {"domain": "clarify", "answer": "请说明需要人工处理的问题，例如：转人工：需要确认某产品的交付负责人。", "pending_handoff": ""}
+        return {"domain": "clarify", "answer": "请补充要查询的对象或需要办理的事情。如果需要人工协助，请回复“转人工”。", "pending_handoff": text}
 
     def finance_node(state: AssistantState) -> dict[str, str]:
         body = expense_body(state["question"])

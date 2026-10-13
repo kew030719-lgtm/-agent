@@ -72,9 +72,10 @@ class RagFlowTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.db = sqlite3.connect(":memory:")
         self.db.execute("PRAGMA foreign_keys = ON")
-        self.db.execute("CREATE TABLE users(username TEXT PRIMARY KEY)")
-        self.db.execute("INSERT INTO users VALUES ('admin')")
-        self.db.execute("INSERT INTO users VALUES ('employee')")
+        self.db.execute("CREATE TABLE users(username TEXT PRIMARY KEY, role TEXT NOT NULL DEFAULT 'employee', enabled INTEGER NOT NULL DEFAULT 1, department_id INTEGER, job_level TEXT NOT NULL DEFAULT 'employee')")
+        self.db.execute("INSERT INTO users(username) VALUES ('admin')")
+        self.db.execute("UPDATE users SET role='admin' WHERE username='admin'")
+        self.db.execute("INSERT INTO users(username) VALUES ('employee')")
         admin = {"username": "admin", "role": "admin"}
         general = self.root / "年假.md"
         general.write_text("# 年假制度\n员工每年有 10 天年假。", encoding="utf-8")
@@ -101,6 +102,22 @@ class RagFlowTests(unittest.TestCase):
         self.assertIn("10 天年假", answer)
         self.assertIn("来源：年假", answer)
         self.assertNotIn("秘密财务数字", client.prompts[0])
+
+    def test_partial_evidence_preserves_verified_facts_and_marks_missing_part(self) -> None:
+        client = FakeClient({
+            "answer": "员工每年有 10 天年假；当前检索资料未说明具体审批人。",
+            "evidence": [{"id": 1, "quote": "员工每年有 10 天年假"}],
+            "needs_human": False, "incomplete": True,
+        })
+        status: dict[str, bool] = {}
+        sources: list[int] = []
+        answer = answer_from_knowledge(client, self.db, self.employee, "有几天年假，由谁审批？",
+                                      FakeEmbedder(), FakeStore(self.db), FakeReranker(),
+                                      source_ids=sources, answer_status=status)
+        self.assertIn("10 天年假", answer)
+        self.assertIn("未说明", answer)
+        self.assertEqual(status, {"incomplete": True})
+        self.assertTrue(sources)
 
     def test_invented_quote_is_rejected(self) -> None:
         client = FakeClient({
@@ -260,7 +277,8 @@ class RagFlowTests(unittest.TestCase):
         )
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["rating"], "有用")
-        self.assertEqual(items[0]["question"], "年假怎么申请？")
+        self.assertEqual(items[0]["answer"], "正文已隐藏")  # mock 回答没有提供可验证来源。
+        self.assertEqual(self.db.execute("SELECT question FROM knowledge_feedback").fetchone()[0], "年假怎么申请？")
         summary = list_usage_summary(
             self.db, {"username": "admin", "role": "admin"}
         )

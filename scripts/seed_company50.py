@@ -8,11 +8,13 @@ from typing import Any
 from app.agent.service import AssistantService
 from app.api.database import initialize
 from app.auth import DB_PATH, connect, insert_user
+from app.knowledge.catalog import ProductMetadata, register_product
 from app.knowledge.documents import add_knowledge_file
 from app.knowledge.embeddings import index_document
 from app.tools.leave import set_leave_balance
 from app.tools.meeting import add_meeting_room
 from scripts.company_simulation import BASE, configure, counts, save_json
+from scripts.organize_company50 import assign_organization, write_accounts
 
 
 ROLE_COUNTS = {"admin": 2, "hr": 3, "it": 5, "finance": 4, "employee": 36}
@@ -149,6 +151,8 @@ def seed() -> Path:
         for account in accounts:
             insert_user(db, account["username"], account["password"], account["role"])
             set_leave_balance(db, admin, account["username"], account["leave_days"])
+        assign_organization(db, accounts)
+        write_accounts(root, accounts)
         for name, floor, capacity in [("青松", "1楼", 6), ("竹影", "1楼", 10), ("云帆", "2楼", 16), ("星海", "2楼", 24)]:
             add_meeting_room(db, admin, name + "会议室", floor, capacity)
         print("50个账号、50条余额、4间会议室已创建", flush=True)
@@ -156,6 +160,10 @@ def seed() -> Path:
         try:
             for path in make_documents(root):
                 document_id = add_knowledge_file(db, admin, path, "general", root)
+                if path.stem.startswith("维科产品"):
+                    number = int(path.stem[4:6])
+                    with db:
+                        register_product(db, admin, document_id, ProductMetadata(company="维科科技", code=f"WK-P{number:02d}", name=path.stem))
                 total = index_document(db, document_id, service.get_embedder(), service.get_store())
                 print(f"已导入 {path.name}：{total}个切片", flush=True)
         finally:

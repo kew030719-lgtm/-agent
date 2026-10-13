@@ -111,7 +111,7 @@ class ServiceFlowTests(unittest.TestCase):
                 self.assertEqual(db.execute("SELECT COUNT(*) FROM knowledge_usage").fetchone()[0], 0)
                 store.return_value.close.assert_called_once()
 
-    def test_insufficient_evidence_still_creates_handoff(self) -> None:
+    def test_insufficient_evidence_offers_handoff_without_creating_it(self) -> None:
         handoff = Mock(return_value=7)
         graph = build_graph(
             Mock(return_value="knowledge"), Mock(), Mock(), handoff,
@@ -121,8 +121,9 @@ class ServiceFlowTests(unittest.TestCase):
             {"user": {"username": "employee", "role": "employee"}, "question": "制度问题"},
             config={"configurable": {"thread_id": "missing-evidence"}},
         )
-        handoff.assert_called_once()
-        self.assertIn("待办 #7", result["answer"])
+        handoff.assert_not_called()
+        self.assertIn("转人工", result["answer"])
+        self.assertEqual(result["pending_handoff"], "制度问题")
 
 
 if __name__ == "__main__":

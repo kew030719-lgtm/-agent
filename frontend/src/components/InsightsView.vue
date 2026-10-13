@@ -31,8 +31,7 @@ onMounted(async (): Promise<void> => {
   <section class="page-content">
     <div class="page-heading">
       <div>
-        <span class="eyebrow">FEEDBACK & INSIGHTS</span>
-        <h1>每一次反馈，让回答更好。</h1>
+        <h1>反馈与统计</h1>
         <p class="muted">了解知识问答的使用情况，查看员工主动提交的评价。</p>
       </div>
     </div>

@@ -9,6 +9,7 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 
 from app.agent.service import TurnResult
+from app.agent.dialogue import QuestionPlan
 from app.agent.meeting_dialogue import MeetingRequest
 from app.tools.meeting import add_meeting_room
 from app.api.app import create_app
@@ -88,7 +89,7 @@ class ApiTests(unittest.TestCase):
         self.login()
         cid = self.conversation()
         other = self.conversation()
-        with patch("app.agent.service.route_question", return_value="meeting"), patch("app.agent.service.interpret_meeting", side_effect=[
+        with patch("app.agent.service.plan_question", return_value=QuestionPlan(domain="meeting", confidence=1.0)), patch("app.agent.service.interpret_meeting", side_effect=[
             MeetingRequest(mode="period", capacity=8, start_at="2026-10-13 15:00"),
             MeetingRequest(mode="period", capacity=8, start_at="2026-10-13 15:00", end_at="2026-10-13 16:00"),
             MeetingRequest(mode="list", capacity=8),
@@ -106,7 +107,7 @@ class ApiTests(unittest.TestCase):
         cid = self.conversation()
         with sqlite3.connect(self.database) as db:
             room = add_meeting_room(db, {"username": "admin", "role": "admin"}, "竹影", "1楼", 10)
-        with patch("app.agent.service.route_question", return_value="meeting"), patch("app.agent.service.interpret_meeting", return_value=MeetingRequest(
+        with patch("app.agent.service.plan_question", return_value=QuestionPlan(domain="meeting", confidence=1.0)), patch("app.agent.service.interpret_meeting", return_value=MeetingRequest(
             mode="book", room_id=room, capacity=8, start_at="2099-10-13 15:00", end_at="2099-10-13 16:00",
         )):
             self.assertIn("请确认预订", self.send(cid, "订竹影，明天下午三点到四点")["answer"])
@@ -146,7 +147,7 @@ class ApiTests(unittest.TestCase):
     def test_ticket_confirmation_persists_and_request_retry_does_not_duplicate(self) -> None:
         self.login()
         conversation = self.conversation()
-        with patch("app.agent.service.route_question", return_value="it"):
+        with patch("app.agent.service.plan_question", return_value=QuestionPlan(domain="it", confidence=1.0)):
             first = self.send(conversation, "电脑无法联网")
         self.assertIn("确认报修", first["answer"])
         self.login()  # 新登录仍可继续自己原来的会话。
@@ -172,7 +173,9 @@ class ApiTests(unittest.TestCase):
     def test_feedback_ownership_and_duplicate_guard(self) -> None:
         self.login()
         conversation = self.conversation()
-        with patch.object(self.app.state.assistant, "respond", return_value=TurnResult("knowledge", "原文回答\n来源：制度", feedback_allowed=True)):
+        with closing(connect(self.database)) as db:
+            source_id = add_knowledge_document(db, {"username": "admin", "role": "admin"}, "制度", "原文回答", "general")
+        with patch.object(self.app.state.assistant, "respond", return_value=TurnResult("knowledge", "原文回答\n来源：制度", feedback_allowed=True, source_document_ids=(source_id,))):
             turn = self.send(conversation, "制度问题")
         url = f"/api/messages/{turn['id']}/feedback"
         self.login("another")
@@ -228,10 +231,12 @@ class ApiTests(unittest.TestCase):
             "username": " new-hr ", "password": " initial-password ", "role": "hr",
         })
         self.assertEqual(response.status_code, 201, response.text)
-        self.assertEqual(response.json(), {"username": "new-hr", "role": "hr", "enabled": True})
+        self.assertEqual({key: response.json()[key] for key in ("username", "role", "enabled")},
+                         {"username": "new-hr", "role": "hr", "enabled": True})
         listed = self.client.get("/api/users").json()
         self.assertTrue(any(item["username"] == "new-hr" for item in listed))
-        self.assertTrue(all(set(item) == {"username", "role", "enabled"} for item in listed))
+        self.assertTrue(all(set(item) == {"username", "role", "enabled", "display_name", "department_id",
+                                               "department_name", "job_level", "manager_username"} for item in listed))
         duplicate = self.client.post("/api/users", json={
             "username": "new-hr", "password": "different-password", "role": "admin",
         })

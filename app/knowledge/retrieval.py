@@ -3,7 +3,8 @@ import re
 import os
 from typing import NotRequired, TypedDict
 
-from app.auth import User, has_permission
+from app.auth import User
+from app.knowledge.access import visible_document_ids
 from app.knowledge.documents import SCOPES, KnowledgeSourceRecord, get_visible_chunks_by_ids
 from app.knowledge.embeddings import LocalEmbedder
 from app.knowledge.keyword import search_keywords
@@ -72,21 +73,18 @@ def search_knowledge(
 ) -> list[SearchHit]:
     if limit < 1:
         raise ValueError("检索数量必须大于 0")
-    scopes = tuple(
-        scope for scope in SCOPES if has_permission(user, f"kb:{scope}")
-    )
-    if not scopes:
+    scopes = SCOPES  # 自定义规则由文档 ID 授权，不再叠加旧角色范围。
+    allowed_ids = visible_document_ids(db, user)
+    mentioned = mentioned_documents(db, question)
+    document_ids = tuple(i for i in allowed_ids if not mentioned or i in mentioned)
+    if not document_ids:
         return []
-    document_ids = mentioned_documents(db, question)
     variants = list(dict.fromkeys([question, *(queries or [])]))[:2]
     rankings: list[list[int]] = []
     cosine_scores: dict[int, float] = {}
     for variant in variants:
         query = embedder.embed_query(variant)
-        if document_ids:
-            matches = store.search(query.tolist(), scopes, max(36, limit), document_ids=document_ids)
-        else:
-            matches = store.search(query.tolist(), scopes, max(36, limit))
+        matches = store.search(query.tolist(), scopes, max(36, limit), document_ids=document_ids)
         rankings.append([match["id"] for match in matches])
         rankings.append(search_keywords(db, variant, scopes, max(36, limit), document_ids=document_ids))
         for match in matches:

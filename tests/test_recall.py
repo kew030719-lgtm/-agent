@@ -59,8 +59,9 @@ class RecallTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.db = sqlite3.connect(":memory:")
         self.addCleanup(self.db.close)
-        self.db.execute("CREATE TABLE users(username TEXT PRIMARY KEY)")
-        self.db.execute("INSERT INTO users VALUES ('admin')")
+        self.db.execute("CREATE TABLE users(username TEXT PRIMARY KEY, role TEXT NOT NULL DEFAULT 'employee', enabled INTEGER NOT NULL DEFAULT 1, department_id INTEGER, job_level TEXT NOT NULL DEFAULT 'employee')")
+        self.db.execute("INSERT INTO users(username) VALUES ('admin')")
+        self.db.execute("UPDATE users SET role='admin' WHERE username='admin'")
         self.admin = {"username": "admin", "role": "admin"}
         environment = patch.dict("os.environ", {"RAG_QUERY_REWRITE_ENABLED": "false", "RAG_NEIGHBOR_CONTEXT_ENABLED": "true"})
         environment.start()

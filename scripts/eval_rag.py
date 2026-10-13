@@ -78,8 +78,9 @@ def main() -> None:
             os.environ["MILVUS_URI"] = str(root / "vectors.db")
             with sqlite3.connect(":memory:") as db:
                 db.execute("PRAGMA foreign_keys = ON")
-                db.execute("CREATE TABLE users(username TEXT PRIMARY KEY)")
-                db.execute("INSERT INTO users VALUES ('admin')")
+                db.execute("CREATE TABLE users(username TEXT PRIMARY KEY, role TEXT NOT NULL DEFAULT 'employee', enabled INTEGER NOT NULL DEFAULT 1, department_id INTEGER, job_level TEXT NOT NULL DEFAULT 'employee')")
+                db.execute("INSERT INTO users(username) VALUES ('admin')")
+                db.execute("UPDATE users SET role='admin' WHERE username='admin'")
                 admin: User = {"username": "admin", "role": "admin"}
                 employee: User = {"username": "employee", "role": "employee"}
                 with MilvusVectorStore() as store:

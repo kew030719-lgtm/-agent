@@ -54,3 +54,14 @@ def initialize(db: sqlite3.Connection) -> None:
     if "meeting_context" not in columns:
         db.execute("ALTER TABLE conversations ADD COLUMN meeting_context TEXT NOT NULL DEFAULT ''")
         db.commit()
+
+    if "knowledge_access_stamp" not in columns:
+        db.execute("ALTER TABLE conversations ADD COLUMN knowledge_access_stamp TEXT NOT NULL DEFAULT ''")
+    turn_columns = {row[1] for row in db.execute("PRAGMA table_info(chat_turns)")}
+    if "source_ids_json" not in turn_columns:
+        db.execute("ALTER TABLE chat_turns ADD COLUMN source_ids_json TEXT")
+    db.commit()
+
+    if "dialogue_context" not in columns:
+        db.execute("ALTER TABLE conversations ADD COLUMN dialogue_context TEXT NOT NULL DEFAULT ''")
+        db.commit()

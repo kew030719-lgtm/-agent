@@ -1,13 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import {
-  ArrowUpRight,
   BarChart3,
   BookOpen,
   ChevronRight,
-  CircleHelp,
   Headphones,
-  Layers3,
+  Building2,
   LogOut,
   Menu,
   MessageSquare,
@@ -46,12 +44,12 @@ const user = ref<User | null>(null),
   sidebarOpen = ref(false);
 const view = ref<View>("chat");
 const names: Record<View, string> = {
-  chat: "智能助手",
+  chat: "工作助手",
   knowledge: "知识库",
   handoffs: "人工待办",
   insights: "反馈与统计",
   profile: "我的权限",
-  users: "用户管理",
+  users: "员工与组织",
 };
 const roles: Record<string, string> = {
   employee: "员工",
@@ -66,7 +64,7 @@ const permissionNames: Record<string, string> = {
   "kb:it": "阅读 IT 知识",
   "kb:finance": "阅读财务知识",
   "kb:write": "管理知识库",
-  "user:create": "创建员工账号",
+  "user:create": "管理员工组织与账号",
   "leave:read_self": "查询本人请假余额",
   "leave:read_all": "读取全部请假余额",
   "leave:write_all": "维护请假余额",
@@ -83,13 +81,13 @@ const navigation = computed(() =>
   [
     {
       id: "users" as View,
-      label: "用户管理",
+      label: "员工与组织",
       icon: Users,
       visible: user.value?.permissions.includes("user:create"),
     },
     {
       id: "chat" as View,
-      label: "智能助手",
+      label: "工作助手",
       icon: MessageSquare,
       visible: true,
     },
@@ -106,7 +104,13 @@ const navigation = computed(() =>
       icon: BarChart3,
       visible: user.value?.permissions.includes("kb:write"),
     },
-  ].filter((item) => item.visible),
+  ]
+    .filter((item) => item.visible)
+    .sort(
+      (a, b) =>
+        ["chat", "knowledge", "handoffs", "users", "insights"].indexOf(a.id) -
+        ["chat", "knowledge", "handoffs", "users", "insights"].indexOf(b.id),
+    ),
 );
 function navigate(target: View): void {
   view.value = target;
@@ -145,6 +149,20 @@ async function choose(id: string): Promise<void> {
   navigate("chat");
   await selectConversation(id);
 }
+async function refreshProfile(): Promise<void> {
+  try {
+    user.value = await api<User>("/auth/me");
+  } catch (err) {
+    pageError.value = errorText(err);
+  }
+}
+const levelNames: Record<string, string> = {
+  employee: "普通员工",
+  team_lead: "组长",
+  department_manager: "部门经理",
+  general_manager: "总经理",
+  chairman: "董事长",
+};
 onMounted(async (): Promise<void> => {
   window.addEventListener("session-expired", expire);
   try {
@@ -160,8 +178,8 @@ onUnmounted(() => window.removeEventListener("session-expired", expire));
 
 <template>
   <div v-if="!ready" class="boot-screen">
-    <Layers3 :size="30" />
-    <p>正在打开工作空间…</p>
+    <Building2 :size="30" />
+    <p>正在加载…</p>
   </div>
   <LoginView v-else-if="!user" @login="loggedIn" />
   <div v-else class="app-shell">
@@ -172,8 +190,8 @@ onUnmounted(() => window.removeEventListener("session-expired", expire));
     ></div>
     <aside class="sidebar" :class="{ open: sidebarOpen }">
       <div class="brand">
-        <span class="brand-mark"><Layers3 :size="23" /></span
-        ><strong>栖知<span>WORKSPACE ASSISTANT</span></strong
+        <span class="brand-mark"><Building2 :size="23" /></span
+        ><strong>栖知<span>员工工作台</span></strong
         ><button
           class="icon-button mobile-only"
           aria-label="关闭导航"
@@ -183,9 +201,9 @@ onUnmounted(() => window.removeEventListener("session-expired", expire));
         </button>
       </div>
       <button class="new-chat" :disabled="busy" @click="startNew">
-        <Plus :size="18" />开始新对话<span>↗</span>
+        <Plus :size="18" />新建对话
       </button>
-      <span class="sidebar-label">工作空间</span>
+      <span class="sidebar-label">应用</span>
       <nav aria-label="主导航">
         <button
           v-for="item in navigation"
@@ -224,25 +242,20 @@ onUnmounted(() => window.removeEventListener("session-expired", expire));
         </div>
       </div>
       <div class="sidebar-bottom">
-        <div class="sidebar-tip">
-          <CircleHelp :size="17" />
-          <div>
-            <strong>让问题找到答案</strong>
-            <p>制度有据可查，事务及时处理。</p>
-          </div>
-        </div>
         <button class="account" @click="navigate('profile')">
           <span class="avatar">{{
             user.username.slice(0, 1).toUpperCase()
           }}</span
           ><span
             ><strong>{{ user.username }}</strong
-            ><small>{{ roles[user.role] || user.role }}工作空间</small></span
+            ><small>{{
+              user.department_name || roles[user.role] || user.role
+            }}</small></span
           ><ShieldCheck :size="17" />
         </button>
       </div>
     </aside>
-    <main class="main-panel">
+    <main class="main-panel" :class="{ 'is-chat': view === 'chat' }">
       <header class="topbar">
         <div class="breadcrumb">
           <button
@@ -251,13 +264,13 @@ onUnmounted(() => window.removeEventListener("session-expired", expire));
             @click="sidebarOpen = true"
           >
             <Menu :size="21" /></button
-          ><span>工作空间</span><ChevronRight :size="14" /><strong>{{
+          ><span>员工工作台</span><ChevronRight :size="14" /><strong>{{
             names[view]
           }}</strong>
         </div>
         <div class="topbar-actions">
           <span class="privacy-label"
-            ><ShieldCheck :size="14" />按账号权限访问</span
+            ><ShieldCheck :size="14" />{{ roles[user.role] || user.role }}</span
           ><button
             class="icon-button"
             title="退出登录"
@@ -274,16 +287,21 @@ onUnmounted(() => window.removeEventListener("session-expired", expire));
       <KnowledgeView v-else-if="view === 'knowledge'" :user="user" />
       <HandoffView v-else-if="view === 'handoffs'" />
       <InsightsView v-else-if="view === 'insights'" />
-      <UsersView v-else-if="view === 'users'" />
+      <UsersView v-else-if="view === 'users'" @saved="refreshProfile" />
       <section v-else class="page-content">
         <div class="page-heading">
           <div>
-            <span class="eyebrow">YOUR ACCESS</span>
-            <h1>你的账号与访问权限</h1>
+            <h1>账号与权限</h1>
             <p class="muted">
-              当前登录为 {{ user.username }}，角色为{{
+              当前登录为 {{ user.display_name || user.username }}，权限角色为{{
                 roles[user.role] || user.role
               }}。
+            </p>
+            <p class="muted">
+              部门：{{ user.department_name || "未分配" }} · 职级：{{
+                levelNames[user.job_level]
+              }}
+              · 直属上级：{{ user.manager_username || "未分配" }}
             </p>
           </div>
           <ShieldCheck :size="32" :stroke-width="1.3" />
@@ -295,7 +313,6 @@ onUnmounted(() => window.removeEventListener("session-expired", expire));
               <strong>{{ permissionNames[permission] || permission }}</strong
               ><small>{{ permission }}</small>
             </div>
-            <ArrowUpRight :size="15" />
           </article>
         </div>
         <p class="page-footnote">

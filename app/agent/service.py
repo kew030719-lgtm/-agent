@@ -13,12 +13,13 @@ from pymilvus.exceptions import MilvusException
 
 from app.agent.graph import build_graph
 from app.agent.meeting_dialogue import interpret_meeting
-from app.agent.router import route_question
+from app.agent.dialogue import DialogueContext, QuestionPlan, plan_question
 from app.auth import User
 from app.errors import ServiceUnavailableError
 from app.knowledge.answer import answer_from_knowledge
 from app.knowledge.embeddings import LocalEmbedder
-from app.knowledge.query import expand_followup, is_followup
+from app.knowledge.access import visible_document_ids
+from app.knowledge.catalog import answer_catalog, visible_products
 from app.knowledge.reranker import LocalReranker
 from app.knowledge.vector_store import MilvusVectorStore
 from app.tools.expense import create_expense_request
@@ -36,6 +37,8 @@ class TurnResult:
     knowledge_question: str = ""
     feedback_allowed: bool = False
     meeting_context: str = ""
+    source_document_ids: tuple[int, ...] = ()
+    dialogue_context: str = ""
 
 
 class AssistantService:
@@ -78,11 +81,21 @@ class AssistantService:
     def respond(
         self, db: sqlite3.Connection, user: User, question: str,
         pending_ticket: str = "", previous_question: str = "",
-        meeting_context: str = "",
+        meeting_context: str = "", dialogue_context: str = "",
     ) -> TurnResult:
         client: OpenAI | None = None
         knowledge_answer: str | None = None
         anchor = ""
+        source_ids: list[int] = []
+        status: dict[str, bool] = {}
+        planned: QuestionPlan | None = None
+        try:
+            context = DialogueContext.model_validate_json(dialogue_context) if dialogue_context else DialogueContext(question=previous_question, topic=previous_question)
+        except ValueError:
+            context = DialogueContext()
+        if context.source_ids and not set(context.source_ids) <= set(visible_document_ids(db, user)):
+            context = DialogueContext()
+
 
         def get_client() -> OpenAI:
             nonlocal client
@@ -99,26 +112,37 @@ class AssistantService:
             return client
 
         def route(text: str) -> str:
-            if previous_question and is_followup(text):
-                return "knowledge"
-            return route_question(get_client(), text)
+            nonlocal planned
+            visible = set(visible_document_ids(db, user))
+            titles = [row[1] for row in db.execute("SELECT id,title FROM knowledge_documents ORDER BY id")
+                      if row[0] in context.source_ids and row[0] in visible][:20]
+            companies = sorted({str(p["company"]) for p in visible_products(db, user)})
+            planned = plan_question(get_client(), text, context, titles, companies)
+            if planned.clarification or planned.needs_human:
+                return "human"
+            return planned.domain
 
         def answer_knowledge(actor: User, text: str) -> str | None:
             nonlocal knowledge_answer, anchor
-            followup = bool(previous_question and is_followup(text))
-            effective = expand_followup(previous_question, text) if followup else text
-            try:
-                with self.lock:
-                    knowledge_answer = answer_from_knowledge(
-                        get_client(), db, actor, effective,
-                        self.get_embedder(), self.get_store(), self.get_reranker(),
-                    )
-            except ServiceUnavailableError:
-                raise
-            except (RuntimeError, OSError, MilvusException) as exc:
-                raise ServiceUnavailableError("知识检索服务不可用，请检查模型和 Milvus。") from exc
-            if knowledge_answer:
-                anchor = previous_question if followup else text
+            effective = (planned.standalone_question or text) if planned is not None else text
+            if planned is not None and planned.knowledge_action != "search":
+                knowledge_answer, ids = answer_catalog(db, actor, planned.knowledge_action, planned.company)
+                source_ids.extend(ids)
+            else:
+                try:
+                    with self.lock:
+                        knowledge_answer = answer_from_knowledge(
+                            get_client(), db, actor, effective,
+                            self.get_embedder(), self.get_store(), self.get_reranker(),
+                            source_ids=source_ids, answer_status=status,
+                        )
+                except ServiceUnavailableError:
+                    raise
+                except (RuntimeError, OSError, MilvusException) as exc:
+                    raise ServiceUnavailableError("知识检索服务不可用，请检查模型和 Milvus。") from exc
+            anchor = effective
+            if knowledge_answer and status.get("incomplete"):
+                return knowledge_answer + "\n需要人工确认的话，请回复“转人工”。"
             return knowledge_answer
 
         graph = build_graph(
@@ -131,14 +155,33 @@ class AssistantService:
         )
         try:
             result = graph.invoke(
-                {"user": user, "question": question, "pending_ticket": pending_ticket, "meeting_context": meeting_context},
+                {"user": user, "question": question, "pending_ticket": pending_ticket, "meeting_context": meeting_context, "pending_handoff": context.pending_handoff},
                 config={"configurable": {"thread_id": uuid4().hex}},
             )
+            if planned is not None and planned.clarification:
+                result["domain"] = "clarify"
+                result["answer"] = planned.clarification + " 如需人工协助，请回复“转人工”。"
+            if result["domain"] == "knowledge":
+                raw_question = question
+                if planned is not None and planned.followup and context.question:
+                    raw_question = f"补全问题：{anchor or question}\n用户问题：{context.clarification_question or context.question}\n当前追问：{question}"
+                pending = raw_question if status.get("incomplete") or knowledge_answer is None else ""
+                updated = DialogueContext(question=question, topic=anchor or question,
+                                          source_ids=source_ids, pending_handoff=pending[:4000],
+                                          catalog_products=[str(p["name"]) for p in visible_products(db, user)
+                                                            if not planned.company or p["company"] == planned.company][:50]
+                                          if planned is not None and planned.knowledge_action != "search" else [])
+            elif result["domain"] == "clarify":
+                # 模糊追问仍保留上一主题，方便回答“我指第二个”后继续。
+                updated = context.model_copy(update={"pending_handoff": result.get("pending_handoff", ""), "clarification_question": question if planned is not None and planned.clarification else ""}) if context.question else DialogueContext(question=question, topic=question, pending_handoff=result.get("pending_handoff", ""), clarification_question=question if planned is not None and planned.clarification else "")
+            else:
+                updated = DialogueContext()
             return TurnResult(
                 domain=result["domain"], answer=result["answer"],
                 pending_ticket=result.get("pending_ticket", ""),
-                knowledge_question=anchor, feedback_allowed=knowledge_answer is not None,
+                knowledge_question=anchor, feedback_allowed=knowledge_answer is not None and bool(source_ids),
                 meeting_context=result.get("meeting_context", ""),
+                source_document_ids=tuple(source_ids), dialogue_context=updated.model_dump_json(),
             )
         finally:
             if client is not None:

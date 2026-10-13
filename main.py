@@ -366,6 +366,7 @@ def run_cli(db: sqlite3.Connection) -> None:
         vector_store: MilvusVectorStore | None = None
         reranker: LocalReranker | None = None
         reranker_checked = False
+        source_ids: list[int] = []
         last_knowledge_answer: str | None = None
         last_knowledge_question: str | None = None
 
@@ -393,7 +394,7 @@ def run_cli(db: sqlite3.Connection) -> None:
                 )
                 answer = answer_from_knowledge(
                     client, db, user, effective_question,
-                    embedder, vector_store, reranker,
+                    embedder, vector_store, reranker, source_ids=source_ids,
                 )
                 last_knowledge_answer = answer
                 if answer and not followup:
@@ -483,7 +484,7 @@ def run_cli(db: sqlite3.Connection) -> None:
                         print("反馈只能是：反馈：有用 或 反馈：无用")
                     else:
                         feedback_id = record_feedback(
-                            db, user, *pending_feedback, rating
+                            db, user, *pending_feedback, rating, source_ids or None
                         )
                         pending_feedback = None
                         print(f"反馈 #{feedback_id} 已记录")
@@ -511,7 +512,7 @@ def run_cli(db: sqlite3.Connection) -> None:
                     continue
 
                 print(f"[{result['domain']}] {result['answer']}")
-                if result["domain"] == "knowledge":
+                if result["domain"] == "human" or (result["domain"] == "knowledge" and last_knowledge_answer is not None):
                     try:
                         record_usage(
                             db, user,

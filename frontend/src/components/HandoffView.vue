@@ -37,8 +37,7 @@ onMounted(load);
   <section class="page-content">
     <div class="page-heading">
       <div>
-        <span class="eyebrow">HUMAN SUPPORT</span>
-        <h1>把需要帮助的人，接住。</h1>
+        <h1>人工待办</h1>
         <p class="muted">查看助手转交的事项，线下处理完成后标记状态。</p>
       </div>
       <button class="secondary" :disabled="loading" @click="load">
@@ -56,31 +55,43 @@ onMounted(load);
       <h3>当前没有待处理事项</h3>
       <p>需要人工协助的问题会出现在这里。</p>
     </div>
-    <div v-else class="handoff-list">
-      <article v-for="item in items" :key="item.id" class="handoff-card">
-        <div class="handoff-head">
-          <span class="tag amber">待处理 · #{{ item.id }}</span
-          ><time>{{ displayTime(item.created_at) }}</time>
-        </div>
-        <h3>{{ item.question }}</h3>
-        <p>{{ item.reason }}</p>
-        <div class="handoff-bottom">
-          <span
-            ><span class="mini-avatar">{{
-              item.created_by.slice(0, 1).toUpperCase()
-            }}</span
-            >{{ item.created_by }}</span
-          ><button
-            class="secondary"
-            :disabled="busyId === item.id"
-            @click="resolve(item.id)"
-          >
-            <Check :size="15" />{{
-              busyId === item.id ? "正在处理…" : "标记已处理"
-            }}
-          </button>
-        </div>
-      </article>
+    <div v-else class="table-card table-scroll">
+      <table class="handoff-table">
+        <thead>
+          <tr>
+            <th>编号 / 时间</th>
+            <th>问题与转交原因</th>
+            <th>发起人</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="item in items" :key="item.id">
+            <td>
+              <span class="tag amber">待处理 · #{{ item.id }}</span
+              ><small class="cell-detail">{{
+                displayTime(item.created_at)
+              }}</small>
+            </td>
+            <td class="handoff-question">
+              <strong>{{ item.question }}</strong>
+              <p>{{ item.reason }}</p>
+            </td>
+            <td>{{ item.created_by }}</td>
+            <td>
+              <button
+                class="secondary"
+                :disabled="busyId === item.id"
+                @click="resolve(item.id)"
+              >
+                <Check :size="15" />{{
+                  busyId === item.id ? "正在处理…" : "标记已处理"
+                }}
+              </button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
     </div>
   </section>
 </template>

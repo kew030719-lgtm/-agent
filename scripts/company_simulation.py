@@ -375,16 +375,16 @@ def run_tests(root: Path, live: bool, base_url: str | None = None) -> None:
                 for question, expected_domain, marker in [
                     ("星河公司的年假申请流程是什么？", "knowledge", "主管"),
                     ("那需要提前多久申请？", "knowledge", "三"),
-                    ("星河公司火星驻地补贴是多少？", "human", "已转人工"),
-                    ("星河公司的财务专用标识是什么？", "human", "已转人工"),
+                    ("星河公司火星驻地补贴是多少？", "knowledge", "回复“转人工”"),
+                    ("星河公司的财务专用标识是什么？", "knowledge", "回复“转人工”"),
                     ("我的电脑无法联网", "it", "确认报修"),
                     ("确认报修", "it", "已创建"),
                 ]:
                     start = time.perf_counter()
                     response = send(client, cid, question)
                     payload = response.json()
-                    # domain 记录原始处理域；知识不足时也可在 knowledge 域创建人工待办。
-                    valid_domain = payload.get("domain") == expected_domain or (expected_domain == "human" and payload.get("domain") == "knowledge" and not payload.get("feedback_allowed"))
+                    # 知识缺少依据时先说明；低置信度允许请求澄清。
+                    valid_domain = payload.get("domain") == expected_domain or (expected_domain == "knowledge" and payload.get("domain") == "clarify" and not payload.get("feedback_allowed"))
                     check(f"真实DeepSeek：{question}", response.status_code == 200 and valid_domain and marker in payload.get("answer", ""),
                           {"seconds": round(time.perf_counter() - start, 2), "http": response.status_code, "response": payload})
                     if payload.get("feedback_allowed"):
@@ -440,7 +440,7 @@ def main() -> None:
         parser.error("test/serve 必须指定 --root")
     root = args.root.resolve()
     if args.command == "serve":
-        uvicorn.run(simulation_app(root, args.port), host="127.0.0.1", port=args.port, log_level="warning")
+        uvicorn.run(simulation_app(root, args.port), host="127.0.0.1", port=args.port, log_level="info")
     else:
         run_tests(root, args.live, args.base_url)
 

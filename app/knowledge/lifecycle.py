@@ -3,7 +3,9 @@ import sqlite3
 from pathlib import Path
 
 from app.auth import User, has_permission
+from app.knowledge.access import AccessPolicy, require_document_manager
 from app.knowledge.documents import add_knowledge_file, ensure_knowledge_schema
+from app.knowledge.catalog import ProductMetadata, register_product
 from app.knowledge.embeddings import LocalEmbedder, index_document
 from app.knowledge.vector_store import MilvusVectorStore
 
@@ -27,6 +29,7 @@ def delete_knowledge_document(
     if not has_permission(actor, "kb:write"):
         raise PermissionError("当前账号无权维护知识库")
     ensure_knowledge_schema(db)
+    require_document_manager(db, actor, document_id)
     _document_scope(db, document_id)
     ids = [
         int(row[0]) for row in db.execute(
@@ -63,9 +66,15 @@ def replace_knowledge_file(
     if not has_permission(actor, "kb:write"):
         raise PermissionError("当前账号无权维护知识库")
     ensure_knowledge_schema(db)
+    require_document_manager(db, actor, document_id)
     scope = _document_scope(db, document_id)
-    new_id = add_knowledge_file(db, actor, path, scope, data_root)
+    policy = AccessPolicy.model_validate_json(db.execute("SELECT access_policy FROM knowledge_documents WHERE id=?", (document_id,)).fetchone()[0])
+    new_id = add_knowledge_file(db, actor, path, scope, data_root, policy)
     try:
+        product = db.execute("SELECT company,code,name FROM product_documents WHERE document_id=?", (document_id,)).fetchone()
+        if product:
+            with db:
+                register_product(db, actor, new_id, ProductMetadata(company=product[0], code=product[1], name=product[2]))
         count = index_document(db, new_id, embedder, store)
     except Exception:
         try:

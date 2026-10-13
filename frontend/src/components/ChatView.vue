@@ -1,14 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
 import {
-  ArrowUp,
+  ArrowRight,
   BookOpen,
   CalendarDays,
   Check,
   Headphones,
-  Layers3,
   RefreshCw,
-  ShieldCheck,
   ThumbsDown,
   ThumbsUp,
   Wrench,
@@ -39,8 +37,13 @@ const labels: Record<string, string> = {
   finance: "财务服务",
   meeting: "会议室",
   human: "人工协助",
+  clarify: "需要补充",
 };
 const pending = computed(() => turns.value.at(-1)?.status === "processing");
+const needsHandoff = computed(() =>
+  turns.value.at(-1)?.answer.includes("回复“转人工”"),
+);
+
 const needsConfirmation = computed(() =>
   turns.value.at(-1)?.answer.includes("回复“确认报修”"),
 );
@@ -86,41 +89,36 @@ watch(selectedId, () => {
   <section class="chat-workspace">
     <div ref="feed" class="chat-feed">
       <div v-if="!turns.length && !busy && !loading" class="welcome">
-        <span class="welcome-icon"
-          ><Layers3 :size="30" :stroke-width="1.5"
-        /></span>
-        <span class="eyebrow">YOUR EVERYDAY WORK COMPANION</span>
-        <h1>
-          你好，{{ user.username }}<span>。</span><br />今天有什么可以帮你？
-        </h1>
-        <p>
-          查制度、办事务，或理清一个工作问题。<br
-            class="mobile-only"
-          />从一句话开始。
-        </p>
+        <div class="welcome-heading">
+          <h1>新建对话</h1>
+          <p>查询公司资料，或办理日常事务。</p>
+        </div>
+        <h2 class="quick-title">常用操作</h2>
         <div class="prompt-grid">
           <button @click="send('公司的年假申请流程是什么？')">
-            <BookOpen :size="21" /><strong>查一查公司制度</strong
-            ><span>了解年假申请流程 <span>↗</span></span>
+            <BookOpen :size="19" /><span
+              ><strong>公司制度</strong><small>查询制度与申请流程</small></span
+            ><ArrowRight :size="16" />
           </button>
           <button @click="send('我的请假余额')">
-            <CalendarDays :size="21" /><strong>查看我的请假余额</strong
-            ><span>查询当前可用天数 <span>↗</span></span>
+            <CalendarDays :size="19" /><span
+              ><strong>请假余额</strong><small>查看本人可用假期</small></span
+            ><ArrowRight :size="16" />
           </button>
           <button @click="send('电脑无法联网')">
-            <Wrench :size="21" /><strong>解决 IT 问题</strong
-            ><span>描述故障，协助报修 <span>↗</span></span>
+            <Wrench :size="19" /><span
+              ><strong>IT 报修</strong><small>提交设备或网络问题</small></span
+            ><ArrowRight :size="16" />
           </button>
           <button @click="send('查会议室')">
-            <Headphones :size="21" /><strong>找一间会议室</strong
-            ><span>查询位置与容纳人数 <span>↗</span></span>
+            <Headphones :size="19" /><span
+              ><strong>会议室</strong><small>查询空闲时段与预订</small></span
+            ><ArrowRight :size="16" />
           </button>
         </div>
-        <div class="welcome-foot">
-          <ShieldCheck
-            :size="15"
-          />回答依据你有权访问的资料，缺少依据时转人工协助。
-        </div>
+        <p class="welcome-foot">
+          也可以直接在下方输入问题。回答会附上可查阅的资料来源。
+        </p>
       </div>
       <div v-if="loading" class="empty-state">正在读取对话…</div>
       <div v-for="turn in turns" :key="turn.id" class="turn">
@@ -131,10 +129,10 @@ watch(selectedId, () => {
           }}</span>
         </div>
         <div class="assistant-message">
-          <span class="assistant-avatar"><Layers3 :size="18" /></span>
+          <span class="assistant-avatar" aria-hidden="true">助</span>
           <div class="answer-body">
             <div class="answer-meta">
-              <strong>栖知</strong
+              <strong>工作助手</strong
               ><span class="tag">{{ labels[turn.domain] || "员工助手" }}</span>
             </div>
             <p v-if="turn.status === 'processing'" class="muted">
@@ -179,9 +177,7 @@ watch(selectedId, () => {
             user.username.slice(0, 1).toUpperCase()
           }}</span>
         </div>
-        <div class="thinking">
-          <span class="pulse"></span>正在理解问题并处理，请稍候…
-        </div>
+        <div class="thinking"><span class="pulse"></span>正在处理…</div>
       </div>
     </div>
     <div class="composer-wrap">
@@ -193,6 +189,11 @@ watch(selectedId, () => {
         ><button class="small-primary" @click="send('确认报修')">
           确认报修</button
         ><button class="secondary" @click="send('取消')">取消</button>
+      </div>
+      <div v-if="needsHandoff && !busy && !pending" class="confirm-actions">
+        <span>需要人工协助吗？</span>
+        <button class="small-primary" @click="send('转人工')">转人工</button>
+        <button class="secondary" @click="send('取消转人工')">暂不需要</button>
       </div>
       <div v-if="pending" class="notice">
         当前对话有请求处理中。<button
@@ -206,7 +207,7 @@ watch(selectedId, () => {
         <textarea
           v-model="draft"
           aria-label="输入员工问题"
-          placeholder="问问公司制度，或告诉我你需要办理的事务…"
+          placeholder="输入问题，例如：年假申请需要哪些材料？"
           rows="2"
           maxlength="2000"
           :disabled="busy || loading || pending"
@@ -214,7 +215,7 @@ watch(selectedId, () => {
         />
         <div class="composer-bottom">
           <span
-            ><span class="dot"></span> 企业员工助手 <i>·</i>
+            >Enter 发送 · Shift + Enter 换行 <i>·</i>
             {{ draft.length }}/2000</span
           ><button
             class="send-button"
@@ -222,13 +223,10 @@ watch(selectedId, () => {
             aria-label="发送问题"
             :disabled="!draft.trim() || busy || loading || pending"
           >
-            <ArrowUp :size="20" />
+            发送<ArrowRight :size="16" />
           </button>
         </div>
       </form>
-      <p class="composer-note">
-        Enter 发送，Shift + Enter 换行 · 涉及业务操作时，请核对处理结果。
-      </p>
     </div>
   </section>
 </template>

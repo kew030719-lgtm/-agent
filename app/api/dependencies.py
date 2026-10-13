@@ -7,6 +7,7 @@ from typing import Annotated
 from fastapi import Depends, HTTPException, Request
 
 from app.auth import ROLE_PERMISSIONS, User, connect
+from app.organization import read_user
 
 
 COOKIE_NAME = "employee_session"
@@ -37,7 +38,10 @@ def current_user(request: Request, db: Database) -> User:
     ).fetchone()
     if row is None or row["role"] not in ROLE_PERMISSIONS:
         raise HTTPException(401, "登录已失效，请重新登录")
-    return {"username": row["username"], "role": row["role"]}
+    record = read_user(db, row["username"])
+    assert record is not None
+    record.pop("enabled")
+    return record
 
 
 Actor = Annotated[User, Depends(current_user)]

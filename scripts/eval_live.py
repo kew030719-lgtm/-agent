@@ -60,8 +60,9 @@ def main() -> None:
             "MILVUS_COLLECTION": "live_eval_knowledge",
         }), sqlite3.connect(":memory:") as db:
             db.execute("PRAGMA foreign_keys = ON")
-            db.execute("CREATE TABLE users(username TEXT PRIMARY KEY)")
-            db.executemany("INSERT INTO users VALUES (?)", [("admin",), ("employee",)])
+            db.execute("CREATE TABLE users(username TEXT PRIMARY KEY, role TEXT NOT NULL DEFAULT 'employee', enabled INTEGER NOT NULL DEFAULT 1, department_id INTEGER, job_level TEXT NOT NULL DEFAULT 'employee')")
+            db.executemany("INSERT INTO users(username) VALUES (?)", [("admin",), ("employee",)])
+            db.execute("UPDATE users SET role='admin' WHERE username='admin'")
             admin: User = {"username": "admin", "role": "admin"}
             employee: User = {"username": "employee", "role": "employee"}
             with MilvusVectorStore() as store:
@@ -91,12 +92,12 @@ def main() -> None:
                     and "kb:finance" not in employee_results[1],
                 "知识回答与来源": all(word in employee_results[2] for word in ("来源：年假", "请假单", "主管")),
                 "多轮追问": "来源：年假" in employee_results[3] and "主管" in employee_results[3],
-                "无资料转人工": "已转人工" in employee_results[4],
-                "员工无法获取财务资料": "已转人工" in employee_results[5]
+                '无资料先说明': '回复“转人工”' in employee_results[4],
+                '员工无法获取财务资料': '回复“转人工”' in employee_results[5]
                     and "发票" not in employee_results[5],
                 "管理员可获取财务资料": "来源：报销" in admin_results[0]
                     and "发票" in admin_results[0],
-                "仅生成两条必要待办": db.execute("SELECT COUNT(*) FROM handoffs").fetchone()[0] == 2,
+                "未确认不生成待办": db.execute("SELECT COUNT(*) FROM handoffs").fetchone()[0] == 0,
             }
             for label, passed in checks.items():
                 print(f"{'通过' if passed else '失败'}：{label}")

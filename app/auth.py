@@ -3,7 +3,9 @@ import hmac
 import secrets
 import sqlite3
 from pathlib import Path
-from typing import TypedDict
+from typing import NotRequired, TypedDict
+
+from app.organization import OrganizationFields, ensure_organization_schema, read_user, set_organization, validate_organization
 
 
 DB_PATH = Path(__file__).resolve().parents[1] / "data" / "employee_assistant.db"
@@ -37,6 +39,11 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
 class User(TypedDict):
     username: str
     role: str
+    display_name: NotRequired[str]
+    department_id: NotRequired[int | None]
+    department_name: NotRequired[str | None]
+    job_level: NotRequired[str]
+    manager_username: NotRequired[str | None]
 
 
 def connect(database_path: Path = DB_PATH, *, check_same_thread: bool = True) -> sqlite3.Connection:
@@ -54,6 +61,7 @@ def connect(database_path: Path = DB_PATH, *, check_same_thread: bool = True) ->
             enabled INTEGER NOT NULL DEFAULT 1
         )
     """)
+    ensure_organization_schema(db)
     return db
 
 
@@ -68,6 +76,7 @@ def insert_user(
     username: str,
     password: str,
     role: str,
+    organization: OrganizationFields | None = None,
 ) -> None:
     if not username or len(password) < 8 or role not in ROLE_PERMISSIONS:
         raise ValueError("账号、密码或角色无效；密码至少 8 位")
@@ -79,6 +88,9 @@ def insert_user(
             "VALUES (?, ?, ?, ?)",
             (username, salt, hash_password(password, salt), role),
         )
+        if organization is not None:
+            set_organization(db, username, organization)
+            validate_organization(db)
 
 
 def create_first_admin(
@@ -116,7 +128,10 @@ def authenticate(
     ):
         return None
 
-    return {"username": username, "role": role}
+    record = read_user(db, username)
+    assert record is not None
+    record.pop("enabled")
+    return record
 
 
 def has_permission(user: User, permission: str) -> bool:
@@ -129,8 +144,9 @@ def create_user(
     username: str,
     password: str,
     role: str,
+    organization: OrganizationFields | None = None,
 ) -> None:
     if not has_permission(actor, "user:create"):
         raise PermissionError("当前账号无权创建用户")
 
-    insert_user(db, username, password, role)
+    insert_user(db, username, password, role, organization)

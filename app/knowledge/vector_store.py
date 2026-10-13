@@ -83,9 +83,9 @@ class MilvusVectorStore:
         vector: Iterable[float],
         scopes: tuple[str, ...],
         limit: int,
-        document_ids: tuple[int, ...] = (),
+        document_ids: tuple[int, ...] | None = None,
     ) -> list[VectorMatch]:
-        if not scopes or limit < 1:
+        if not scopes or document_ids == () or limit < 1:
             return []
         allowed = {"general", "hr", "it", "finance"}
         if not set(scopes) <= allowed:

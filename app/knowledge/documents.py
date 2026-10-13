@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import TypedDict
 
 from app.auth import User, has_permission
+from app.knowledge.access import AccessPolicy, ensure_access_schema, visible_document_ids, write_policy
+from app.knowledge.catalog import ensure_catalog_schema
 from app.knowledge.blocks import ParsedBlock, SourceLocation
 from app.knowledge.chunks import KnowledgeChunk, chunk_blocks
 from app.knowledge.parsers.dispatch import parse_file
@@ -155,6 +157,8 @@ def ensure_knowledge_schema(db: sqlite3.Connection) -> None:
         _insert_chunks(db, document_id, chunk_blocks(blocks))
     if not has_keyword_index:
         db.execute("INSERT INTO knowledge_fts(knowledge_fts) VALUES ('rebuild')")
+    ensure_access_schema(db)
+    ensure_catalog_schema(db)
     db.commit()
 
 
@@ -211,6 +215,7 @@ def add_knowledge_document(
     title: str,
     content: str,
     scope: str,
+    policy: AccessPolicy | None = None,
 ) -> int:
     if not has_permission(actor, "kb:write"):
         raise PermissionError("当前账号无权维护知识库")
@@ -237,6 +242,8 @@ def add_knowledge_document(
             location=SourceLocation(), text_source="native",
         )]
         _insert_chunks(db, document_id, chunk_blocks(blocks))
+        if policy is not None:
+            write_policy(db, actor, document_id, policy)
     return document_id
 
 
@@ -246,6 +253,7 @@ def add_knowledge_file(
     path: Path,
     scope: str,
     data_root: Path,
+    policy: AccessPolicy | None = None,
 ) -> int:
     if not has_permission(actor, "kb:write"):
         raise PermissionError("当前账号无权维护知识库")
@@ -277,6 +285,8 @@ def add_knowledge_file(
             if cursor.lastrowid is None:
                 raise RuntimeError("知识文件创建失败")
             document_id = cursor.lastrowid
+            if policy is not None:
+                write_policy(db, actor, document_id, policy)
             stored_path = (
                 data_root / "knowledge" / "files" / str(document_id)
                 / f"source{suffix}"
@@ -314,19 +324,16 @@ def list_visible_documents(
     db: sqlite3.Connection,
     user: User,
 ) -> list[KnowledgeDocument]:
-    allowed_scopes = tuple(
-        scope for scope in SCOPES
-        if has_permission(user, f"kb:{scope}")
-    )
-    if not allowed_scopes:
+    allowed_ids = visible_document_ids(db, user)
+    if not allowed_ids:
         return []
 
-    placeholders = ", ".join("?" for _ in allowed_scopes)
+    placeholders = ", ".join("?" for _ in allowed_ids)
     rows = db.execute(
         "SELECT id, title, content, scope, created_by, created_at "
-        f"FROM knowledge_documents WHERE scope IN ({placeholders}) "
+        f"FROM knowledge_documents WHERE id IN ({placeholders}) "
         "ORDER BY id",
-        allowed_scopes,
+        allowed_ids,
     ).fetchall()
 
     return [
@@ -346,22 +353,19 @@ def list_visible_chunks(
     db: sqlite3.Connection,
     user: User,
 ) -> list[KnowledgeChunkRecord]:
-    allowed_scopes = tuple(
-        scope for scope in SCOPES
-        if has_permission(user, f"kb:{scope}")
-    )
-    if not allowed_scopes:
+    allowed_ids = visible_document_ids(db, user)
+    if not allowed_ids:
         return []
-    placeholders = ", ".join("?" for _ in allowed_scopes)
+    placeholders = ", ".join("?" for _ in allowed_ids)
     rows = db.execute(
         "SELECT c.id, d.id, d.title, c.text, d.scope, "
         "c.heading_path_json, c.locations_json, c.image_refs_json, "
         "c.embedding, c.embedding_model "
         "FROM knowledge_chunks AS c "
         "JOIN knowledge_documents AS d ON d.id = c.document_id "
-        f"WHERE d.scope IN ({placeholders}) "
+        f"WHERE d.id IN ({placeholders}) "
         "ORDER BY d.id, c.chunk_order",
-        allowed_scopes,
+        allowed_ids,
     ).fetchall()
     return [
         {
@@ -381,21 +385,18 @@ def get_visible_chunks_by_ids(
     user: User,
     chunk_ids: list[int],
 ) -> dict[int, KnowledgeSourceRecord]:
-    allowed_scopes = tuple(
-        scope for scope in SCOPES
-        if has_permission(user, f"kb:{scope}")
-    )
-    if not allowed_scopes or not chunk_ids:
+    allowed_ids = visible_document_ids(db, user)
+    if not allowed_ids or not chunk_ids:
         return {}
-    scope_marks = ", ".join("?" for _ in allowed_scopes)
+    scope_marks = ", ".join("?" for _ in allowed_ids)
     id_marks = ", ".join("?" for _ in chunk_ids)
     rows = db.execute(
         "SELECT c.id, d.id, d.title, c.text, d.scope, "
         "c.heading_path_json, c.locations_json, c.image_refs_json "
         "FROM knowledge_chunks AS c "
         "JOIN knowledge_documents AS d ON d.id = c.document_id "
-        f"WHERE d.scope IN ({scope_marks}) AND c.id IN ({id_marks})",
-        (*allowed_scopes, *chunk_ids),
+        f"WHERE d.id IN ({scope_marks}) AND c.id IN ({id_marks})",
+        (*allowed_ids, *chunk_ids),
     ).fetchall()
     return {
         row[0]: {
@@ -413,21 +414,18 @@ def list_visible_assets(
     db: sqlite3.Connection,
     user: User,
 ) -> list[KnowledgeAssetRecord]:
-    allowed_scopes = tuple(
-        scope for scope in SCOPES
-        if has_permission(user, f"kb:{scope}")
-    )
-    if not allowed_scopes:
+    allowed_ids = visible_document_ids(db, user)
+    if not allowed_ids:
         return []
-    placeholders = ", ".join("?" for _ in allowed_scopes)
+    placeholders = ", ".join("?" for _ in allowed_ids)
     rows = db.execute(
         "SELECT a.id, d.id, d.title, d.scope, "
         "a.image_ref, a.location_json "
         "FROM knowledge_assets AS a "
         "JOIN knowledge_documents AS d ON d.id = a.document_id "
-        f"WHERE d.scope IN ({placeholders}) "
+        f"WHERE d.id IN ({placeholders}) "
         "ORDER BY d.id, a.block_order",
-        allowed_scopes,
+        allowed_ids,
     ).fetchall()
     return [
         {
@@ -447,18 +445,15 @@ def get_visible_asset_path(
 ) -> Path | None:
     if asset_id < 1:
         return None
-    allowed_scopes = tuple(
-        scope for scope in SCOPES
-        if has_permission(user, f"kb:{scope}")
-    )
-    if not allowed_scopes:
+    allowed_ids = visible_document_ids(db, user)
+    if not allowed_ids:
         return None
-    placeholders = ", ".join("?" for _ in allowed_scopes)
+    placeholders = ", ".join("?" for _ in allowed_ids)
     row = db.execute(
         "SELECT a.image_ref, d.id FROM knowledge_assets AS a "
         "JOIN knowledge_documents AS d ON d.id = a.document_id "
-        f"WHERE a.id = ? AND d.scope IN ({placeholders})",
-        (asset_id, *allowed_scopes),
+        f"WHERE a.id = ? AND d.id IN ({placeholders})",
+        (asset_id, *allowed_ids),
     ).fetchone()
     if row is None:
         return None

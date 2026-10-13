@@ -18,10 +18,10 @@ def search_keywords(
     question: str,
     scopes: tuple[str, ...],
     limit: int,
-    document_ids: tuple[int, ...] = (),
+    document_ids: tuple[int, ...] | None = None,
 ) -> list[int]:
     terms = _query_terms(question)
-    if not terms or not scopes or limit < 1:
+    if not terms or not scopes or document_ids == () or limit < 1:
         return []
     expression = " OR ".join(f'"{term}"' for term in terms)
     marks = ", ".join("?" for _ in scopes)
@@ -34,6 +34,6 @@ def search_keywords(
         "JOIN knowledge_documents AS d ON d.id = c.document_id "
         f"WHERE knowledge_fts MATCH ? AND d.scope IN ({marks}){document_filter} "
         "ORDER BY bm25(knowledge_fts) LIMIT ?",
-        (expression, *scopes, *document_ids, limit),
+        (expression, *scopes, *(document_ids or ()), limit),
     ).fetchall()
     return [int(row[0]) for row in rows]

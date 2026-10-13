@@ -6,10 +6,18 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
-data/*.db*
-data/knowledge/
-data/milvus/
-data/company_simulation/
+/data/
 frontend/node_modules/
 frontend/dist/
 frontend/*.tsbuildinfo
+
+# 本地历史专项评估：依赖已删除的星河语料或历史快照，不再随仓库发布。
+/scripts/eval_company_routing.py
+/scripts/eval_recall.py
+/scripts/eval_recall_live.py
+/scripts/eval_rerank_latency.py
+
+# 本机工具配置与运行日志
+/.agents/
+/.codex/
+*.log
