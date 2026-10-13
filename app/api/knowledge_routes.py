@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Annotated, Literal
+from uuid import UUID
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
@@ -11,10 +12,11 @@ from app.knowledge.access import AccessPolicy, can_manage_document, require_docu
 
 from app.api.dependencies import Actor, Database
 from app.api.schemas import KnowledgeFile
+from app.api.schemas import InputModel
+from app.ingestion.jobs import create_import_job, create_reindex_job, get_job, publish_job, JobConflictError as JobConflict
 from app.auth import User, has_permission
-from app.knowledge.documents import add_knowledge_file, get_visible_asset_path
+from app.knowledge.documents import get_visible_asset_path
 from app.knowledge.catalog import ProductMetadata, register_product
-from app.knowledge.embeddings import index_document
 from app.knowledge.lifecycle import delete_knowledge_document
 
 
@@ -38,7 +40,7 @@ def list_files(user: Actor, db: Database, managed: bool = False) -> list[dict[st
         return []
     placeholders = ",".join("?" for _ in ids)
     rows = db.execute(
-        "SELECT d.id,d.title,d.scope,d.source_format,d.created_at,d.access_policy,COUNT(c.id) AS chunks "
+        "SELECT d.id,d.title,d.scope,d.source_format,d.created_at,d.access_policy,d.index_status,COUNT(c.id) AS chunks "
         "FROM knowledge_documents d LEFT JOIN knowledge_chunks c ON c.document_id=d.id "
         f"WHERE d.id IN ({placeholders}) GROUP BY d.id ORDER BY d.id DESC", ids,
     ).fetchall()
@@ -139,14 +141,15 @@ def set_product(document_id: int, body: ProductMetadata, user: Actor, db: Databa
     return body.model_copy(update={"code": body.code.upper()})
 
 
-@router.post("", status_code=201)
+@router.post("", status_code=202)
 def upload_file(
     request: Request, user: Actor, db: Database,
     file: Annotated[UploadFile, File()],
     scope: Annotated[Literal["general", "hr", "it", "finance"], Form()],
+    request_key: Annotated[UUID, Form()],
     access_policy: Annotated[str | None, Form()] = None,
     product_metadata: Annotated[str | None, Form()] = None,
-) -> dict[str, int]:
+) -> dict[str, object]:
     require_writer(user)
     policy = AccessPolicy.model_validate_json(access_policy) if access_policy is not None else AccessPolicy(mode="legacy")
     validate_policy_targets(db, policy)
@@ -166,30 +169,26 @@ def upload_file(
                 target.write(chunk)
         if not total:
             raise HTTPException(400, "不能上传空文件")
-        service = request.app.state.assistant
-        with service.lock:
-            store = service.get_store()
-            embedder = service.get_embedder()
-            document_id = add_knowledge_file(db, user, path, scope, request.app.state.data_root, policy)
-            if product is not None:
-                with db:
-                    register_product(db, user, document_id, product)
-            try:
-                count = index_document(db, document_id, embedder, store)
-            except Exception as exc:
-                raise HTTPException(503, f"文档 #{document_id} 已保存，但索引未完成；请点击重建索引") from exc
-    return {"id": document_id, "chunks": count}
+        try:
+            job = create_import_job(db, user, path, scope, request.app.state.data_root, policy, product, str(request_key))
+        except JobConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+    publish_job(db, str(job["id"]))
+    return get_job(db, user, str(job["id"]))
 
 
-@router.post("/{document_id}/reindex")
-def reindex(document_id: int, request: Request, user: Actor, db: Database) -> dict[str, int]:
-    require_document_manager(db, user, document_id)
-    if db.execute("SELECT id FROM knowledge_documents WHERE id=?", (document_id,)).fetchone() is None:
-        raise HTTPException(404, "文档不存在")
-    service = request.app.state.assistant
-    with service.lock:
-        count = index_document(db, document_id, service.get_embedder(), service.get_store())
-    return {"id": document_id, "chunks": count}
+class ReindexInput(InputModel):
+    request_key: UUID
+
+
+@router.post("/{document_id}/reindex", status_code=202)
+def reindex(document_id: int, body: ReindexInput, user: Actor, db: Database) -> dict[str, object]:
+    try:
+        job = create_reindex_job(db, user, document_id, str(body.request_key))
+    except JobConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    publish_job(db, str(job["id"]))
+    return get_job(db, user, str(job["id"]))
 
 
 @router.delete("/{document_id}", status_code=204)
@@ -199,4 +198,7 @@ def delete_file(document_id: int, request: Request, user: Actor, db: Database) -
         raise HTTPException(404, "文档不存在")
     service = request.app.state.assistant
     with service.lock:
-        delete_knowledge_document(db, user, document_id, request.app.state.data_root, service.get_store())
+        try:
+            delete_knowledge_document(db, user, document_id, request.app.state.data_root, service.get_store())
+        except JobConflict as exc:
+            raise HTTPException(409, str(exc)) from exc

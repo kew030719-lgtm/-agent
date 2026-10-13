@@ -1,5 +1,6 @@
 import os
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -45,6 +46,8 @@ def index_document(
     document_id: int,
     embedder: LocalEmbedder,
     store: MilvusVectorStore,
+    *,
+    progress: Callable[[str, int, int], None] | None = None,
 ) -> int:
     rows = db.execute(
         "SELECT c.id, c.text, d.scope, c.embedding, c.embedding_model "
@@ -54,11 +57,16 @@ def index_document(
         (document_id,),
     ).fetchall()
     count = 0
+    total = len(rows)
+    if progress is not None:
+        progress("embedding", 0, total)
     for start in range(0, len(rows), 32):
         batch = rows[start:start + 32]
         existing = store.existing_scopes([row[0] for row in batch])
         pending = [row for row in batch if existing.get(row[0]) != row[2]]
         if not pending:
+            if progress is not None:
+                progress("indexing", start + len(batch), total)
             continue
         vectors: dict[int, np.ndarray] = {}
         fresh = []
@@ -69,6 +77,8 @@ def index_document(
                     vectors[chunk_id] = vector
                     continue
             fresh.append((chunk_id, text))
+        if progress is not None:
+            progress("embedding", start, total)
         for (chunk_id, _text), blob in zip(
             fresh, embedder.embed([text for _chunk_id, text in fresh])
         ):
@@ -80,7 +90,11 @@ def index_document(
             }
             for row in pending
         ]
+        if progress is not None:
+            progress("indexing", start, total)
         count += store.upsert(records)
+        if progress is not None:
+            progress("indexing", start + len(batch), total)
     return count
 
 

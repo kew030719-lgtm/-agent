@@ -12,16 +12,16 @@ from fastapi.security import APIKeyHeader
 from pymilvus.exceptions import MilvusException
 
 from app.agent.service import AssistantService
-from app.api import admin_routes, auth_routes, chat_routes, knowledge_routes, user_routes
+from app.api import admin_routes, auth_routes, chat_routes, expense_routes, ticket_routes, leave_routes, knowledge_routes, user_routes, work_center_routes, ingestion_routes
 from app.api.database import initialize
-from app.auth import DB_PATH, connect
-from app.config import PROJECT_ROOT, load_config
+from app.auth import connect
+from app.config import PROJECT_ROOT, configured_database_path, load_config, model_data_root
 from app.errors import ServiceUnavailableError
 
 
 def create_app(database_path: Path | None = None) -> FastAPI:
     load_config()
-    path = database_path or Path(os.getenv("API_DATABASE_PATH", str(DB_PATH)))
+    path = configured_database_path(database_path)
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -35,7 +35,7 @@ def create_app(database_path: Path | None = None) -> FastAPI:
     application = FastAPI(title="企业员工助手 API", version="1.0.0", lifespan=lifespan)
     application.state.database_path = path
     application.state.data_root = path.parent
-    application.state.assistant = AssistantService(path.parent)
+    application.state.assistant = AssistantService(model_data_root(path.parent))
     origins = [item.strip() for item in os.getenv(
         "API_ALLOWED_ORIGINS", "http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:8000,http://localhost:8000",
     ).split(",") if item.strip()]
@@ -79,7 +79,7 @@ def create_app(database_path: Path | None = None) -> FastAPI:
         name="X-Requested-With", scheme_name="RequestMarker", auto_error=False,
         description="填写 employee-assistant；登录后浏览器会自动携带会话 Cookie。",
     )
-    for router in (auth_routes.router, chat_routes.router, knowledge_routes.router, admin_routes.router, user_routes.router):
+    for router in (auth_routes.router, chat_routes.router, expense_routes.router, ticket_routes.router, leave_routes.router, knowledge_routes.router, admin_routes.router, user_routes.router, work_center_routes.router, ingestion_routes.router):
         application.include_router(router, prefix="/api", dependencies=[Depends(marker)])
 
     @application.get("/api/health", tags=["服务状态"])

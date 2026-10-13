@@ -19,7 +19,7 @@ def profile_answer(user: User, domain: str) -> str:
     if domain == "identity":
         return (
             "我是企业内部员工助手，可以回答你有权查看的知识问题，"
-            "协助提交 IT 工单、查询本人请假余额、发起报销，以及查询和预订会议室。"
+            "协助提交 IT 工单和查询本人报修进度、查询本人请假余额、申请年假和查询审批进度、发起报销，以及查询和预订会议室。"
             "知识资料不足时会说明；你可以确认转人工，由工作人员继续处理。"
         )
     permissions = sorted(ROLE_PERMISSIONS.get(user["role"], frozenset()))

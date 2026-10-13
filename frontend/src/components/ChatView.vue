@@ -32,6 +32,8 @@ const labels: Record<string, string> = {
   knowledge: "知识问答",
   identity: "员工助手",
   permissions: "账号权限",
+  todos: "我的待办",
+  notifications: "站内通知",
   it: "IT 服务",
   hr: "人事服务",
   finance: "财务服务",
@@ -44,9 +46,7 @@ const needsHandoff = computed(() =>
   turns.value.at(-1)?.answer.includes("回复“转人工”"),
 );
 
-const needsConfirmation = computed(() =>
-  turns.value.at(-1)?.answer.includes("回复“确认报修”"),
-);
+const confirmation = computed(() => turns.value.at(-1)?.confirmation || "");
 async function send(text = draft.value): Promise<void> {
   const question = text.trim();
   if (!question || busy.value || loading.value) return;
@@ -184,10 +184,10 @@ watch(selectedId, () => {
       <div v-if="chatError" class="notice error" role="alert">
         {{ chatError }}
       </div>
-      <div v-if="needsConfirmation && !busy" class="confirm-actions">
-        <span>是否提交这条报修？</span
-        ><button class="small-primary" @click="send('确认报修')">
-          确认报修</button
+      <div v-if="confirmation && !busy && !pending && !loading" class="confirm-actions">
+        <span>核对上方内容后提交，可直接输入修改要求。</span
+        ><button class="small-primary" @click="send(confirmation)">
+          {{ confirmation }}</button
         ><button class="secondary" @click="send('取消')">取消</button>
       </div>
       <div v-if="needsHandoff && !busy && !pending" class="confirm-actions">

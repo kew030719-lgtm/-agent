@@ -12,14 +12,26 @@ from app.errors import ServiceUnavailableError
 from app.knowledge.feedback import record_feedback
 from app.knowledge.access import access_stamp, sources_visible
 from app.knowledge.usage import record_usage
+from app.tools.notifications import query_notifications
+from app.tools.work_center import query_todos
 
 
 router = APIRouter(tags=["对话"])
 logger = logging.getLogger(__name__)
 
 
-def visible_turn(db: sqlite3.Connection, user: dict[str, object], row: sqlite3.Row) -> dict[str, object]:
+def visible_turn(db: sqlite3.Connection, user: dict[str, object], row: sqlite3.Row,
+                 work_answers: dict[str, str] | None = None) -> dict[str, object]:
     result = dict(row)
+    if result["status"] == "completed" and result["domain"] in {"todos", "notifications"}:
+        # 此类回答是可变业务快照；历史与幂等重放也不能展示已失效权限的旧摘要。
+        answers = work_answers if work_answers is not None else {}
+        domain = result["domain"]
+        if domain not in answers:
+            query = query_todos if domain == "todos" else query_notifications
+            answers[domain] = query(db, user)
+        if result["answer"] != answers[domain]:
+            result.update(answer="这次查询之后，事项状态、通知阅读状态或访问权限已变化。请重新查询，或打开「待办与通知」查看当前结果。", feedback_allowed=False)
     if result["domain"] == "knowledge" and result["feedback_allowed"] and not sources_visible(db, user, result.get("source_ids_json")):
         result.update(answer="此回答的资料权限已变化或旧回答未记录可验证来源，请重新提问。", feedback_allowed=False)
     return result
@@ -50,7 +62,8 @@ def create_conversation(user: Actor, db: Database) -> dict[str, object]:
 @router.get("/conversations/{conversation_id}/messages", response_model=list[ChatTurn])
 def list_messages(conversation_id: str, user: Actor, db: Database) -> list[dict[str, object]]:
     owned_conversation(db, user, conversation_id)
-    return [visible_turn(db, user, row) for row in db.execute(
+    work_answers: dict[str, str] = {}
+    return [visible_turn(db, user, row, work_answers) for row in db.execute(
         "SELECT * FROM chat_turns WHERE conversation_id=? ORDER BY id", (conversation_id,),
     )]
 
@@ -91,16 +104,17 @@ def send_message(
             conversation["knowledge_question"] if same_role and same_access else "",
             conversation["meeting_context"] if same_role else "",
             conversation["dialogue_context"] if same_role and same_access else "",
+            conversation["operation_context"] if same_role else "",
         )
         with db:
             db.execute(
-                "UPDATE chat_turns SET answer=?,domain=?,status='completed',feedback_allowed=?,source_ids_json=? WHERE id=?",
-                (result.answer, result.domain, int(result.feedback_allowed), json.dumps(result.source_document_ids), turn_id),
+                "UPDATE chat_turns SET answer=?,domain=?,status='completed',feedback_allowed=?,source_ids_json=?,confirmation=? WHERE id=?",
+                (result.answer, result.domain, int(result.feedback_allowed), json.dumps(result.source_document_ids), result.confirmation, turn_id),
             )
             db.execute(
                 "UPDATE conversations SET title=CASE WHEN title='新对话' THEN ? ELSE title END,"
-                "pending_ticket=?,knowledge_question=?,meeting_context=?,role=?,knowledge_access_stamp=?,dialogue_context=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                (body.question[:36], result.pending_ticket, result.knowledge_question, result.meeting_context, user["role"], stamp, result.dialogue_context, conversation_id),
+                "pending_ticket=?,knowledge_question=?,meeting_context=?,role=?,knowledge_access_stamp=?,dialogue_context=?,operation_context=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (body.question[:36], result.pending_ticket, result.knowledge_question, result.meeting_context, user["role"], stamp, result.dialogue_context, result.operation_context, conversation_id),
             )
         if result.domain == "human" or (result.domain == "knowledge" and result.feedback_allowed):
             try:

@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pymupdf
 
+from app.config import ocr_tessdata_path
 from app.knowledge.blocks import ParsedBlock, SourceLocation
 from app.knowledge.images import save_pdf_image
 
@@ -17,8 +18,8 @@ def parse_pdf(
 
     blocks: list[ParsedBlock] = []
     text_flags = pymupdf.TEXTFLAGS_DICT & ~pymupdf.TEXT_PRESERVE_IMAGES
-    local_tessdata = data_root / "knowledge" / "tessdata"
-    tessdata = str(local_tessdata) if local_tessdata.is_dir() else None
+    configured_tessdata = ocr_tessdata_path(data_root)
+    tessdata = str(configured_tessdata) if configured_tessdata is not None else None
 
     with pymupdf.open(str(pdf_path)) as document:
         for page_number, page in enumerate(document, start=1):

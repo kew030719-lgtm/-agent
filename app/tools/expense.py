@@ -2,6 +2,7 @@ import sqlite3
 from decimal import Decimal, InvalidOperation
 
 from app.auth import User, has_permission
+from app.tools.expense_approval import assign_approval, ensure_approval_schema
 
 MAX_SQLITE_INTEGER = (1 << 63) - 1
 
@@ -16,6 +17,11 @@ def ensure_expense_schema(db: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    columns = {row[1] for row in db.execute("PRAGMA table_info(expense_requests)")}
+    if "request_key" not in columns:
+        db.execute("ALTER TABLE expense_requests ADD COLUMN request_key TEXT")
+    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_expense_requests_request ON expense_requests(created_by, request_key)")
+    ensure_approval_schema(db)
     db.commit()
 
 def amount_to_cents(amount: str) -> int:
@@ -38,6 +44,7 @@ def create_expense_request(
     user: User,
     amount: str,
     description: str,
+    *, request_key: str | None = None,
 ) -> int:
     if not has_permission(user, "expense:create"):
         raise PermissionError("当前账号无权发起报销")
@@ -49,11 +56,18 @@ def create_expense_request(
 
     with db:
         cursor = db.execute(
-            "INSERT INTO expense_requests(created_by, amount_cents, description) "
-            "VALUES (?, ?, ?)",
-            (user["username"], cents, description),
+            "INSERT INTO expense_requests(created_by, amount_cents, description, request_key) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(created_by, request_key) DO NOTHING",
+            (user["username"], cents, description, request_key),
         )
-
+        if cursor.rowcount and cursor.lastrowid is not None:
+            assign_approval(db, cursor.lastrowid, user["username"])
+        if request_key is not None:
+            row = db.execute("SELECT id,amount_cents,description FROM expense_requests WHERE created_by=? AND request_key=?",
+                             (user["username"], request_key)).fetchone()
+            if row is None or row[1] != cents or row[2] != description:
+                raise ValueError("同一报销请求的内容发生变化，请重新确认")
+            return int(row[0])
     if cursor.lastrowid is None:
         raise RuntimeError("报销申请创建失败")
     return cursor.lastrowid

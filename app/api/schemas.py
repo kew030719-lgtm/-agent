@@ -95,6 +95,7 @@ class Conversation(BaseModel):
 
 
 class ChatTurn(BaseModel):
+    confirmation: str = ""
     id: int
     question: str
     answer: str
@@ -106,6 +107,7 @@ class ChatTurn(BaseModel):
 
 
 class KnowledgeFile(BaseModel):
+    index_status: Literal["pending", "processing", "failed", "ready"] = "ready"
     access_mode: str = "legacy"
     can_read: bool = True
     can_manage: bool = False

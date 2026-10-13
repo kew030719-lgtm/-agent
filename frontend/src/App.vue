@@ -2,6 +2,10 @@
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import {
   BarChart3,
+  ListTodo,
+  Receipt,
+  CalendarDays,
+  Wrench,
   BookOpen,
   ChevronRight,
   Headphones,
@@ -31,22 +35,44 @@ import {
 import LoginView from "./components/LoginView.vue";
 import ChatView from "./components/ChatView.vue";
 import KnowledgeView from "./components/KnowledgeView.vue";
+import TicketsView from "./components/TicketsView.vue";
+import LeaveView from "./components/LeaveView.vue";
+import ExpensesView from "./components/ExpensesView.vue";
 import HandoffView from "./components/HandoffView.vue";
 import InsightsView from "./components/InsightsView.vue";
 import UsersView from "./components/UsersView.vue";
+import WorkCenterView from "./components/WorkCenterView.vue";
 import type { User } from "./types";
+import type { WorkKind, WorkSummary, WorkTarget } from "./workCenterTypes";
 
 type View =
-  "chat" | "knowledge" | "handoffs" | "insights" | "users" | "profile";
+  "chat" | "work-center" | "tickets" | "leave" | "expenses" | "knowledge" | "handoffs" | "insights" | "users" | "profile";
 const user = ref<User | null>(null),
   ready = ref(false),
   pageError = ref(""),
   sidebarOpen = ref(false);
 const view = ref<View>("chat");
+const workSummary = ref<WorkSummary>({ todo_count: 0, unread_count: 0 });
+const targetId = ref<number | undefined>();
+let summaryVersion = 0;
+let summaryTimer: ReturnType<typeof setInterval> | undefined;
+async function refreshSummary(): Promise<void> {
+  if (!user.value || document.hidden) return;
+  const version = ++summaryVersion;
+  const username = user.value.username;
+  try {
+    const result = await api<WorkSummary>("/work-center/summary");
+    if (version === summaryVersion && user.value?.username === username) workSummary.value = result;
+  } catch { /* 角标请求失败时保留当前表单，下一次刷新重试。 */ }
+}
 const names: Record<View, string> = {
   chat: "工作助手",
+  "work-center": "待办与通知",
+  tickets: "IT 工单",
+  leave: "请假与审批",
+  expenses: "报销与审批",
   knowledge: "知识库",
-  handoffs: "人工待办",
+  handoffs: "人工协助",
   insights: "反馈与统计",
   profile: "我的权限",
   users: "员工与组织",
@@ -65,10 +91,12 @@ const permissionNames: Record<string, string> = {
   "kb:finance": "阅读财务知识",
   "kb:write": "管理知识库",
   "user:create": "管理员工组织与账号",
+  "leave:create": "提交年假申请",
   "leave:read_self": "查询本人请假余额",
   "leave:read_all": "读取全部请假余额",
   "leave:write_all": "维护请假余额",
   "ticket:create": "创建 IT 工单",
+  "ticket:manage": "处理 IT 工单",
   "ticket:read_all": "读取全部 IT 工单",
   "expense:create": "发起报销",
   "expense:read_all": "读取全部报销",
@@ -91,12 +119,16 @@ const navigation = computed(() =>
       icon: MessageSquare,
       visible: true,
     },
+    { id: "work-center" as View, label: "待办与通知", icon: ListTodo, visible: true },
+    { id: "tickets" as View, label: "IT 工单", icon: Wrench, visible: true },
+    { id: "leave" as View, label: "请假与审批", icon: CalendarDays, visible: true },
+    { id: "expenses" as View, label: "报销与审批", icon: Receipt, visible: true },
     { id: "knowledge" as View, label: "知识库", icon: BookOpen, visible: true },
     {
       id: "handoffs" as View,
-      label: "人工待办",
+      label: "人工协助",
       icon: Headphones,
-      visible: user.value?.permissions.includes("handoff:manage"),
+      visible: true,
     },
     {
       id: "insights" as View,
@@ -108,19 +140,30 @@ const navigation = computed(() =>
     .filter((item) => item.visible)
     .sort(
       (a, b) =>
-        ["chat", "knowledge", "handoffs", "users", "insights"].indexOf(a.id) -
-        ["chat", "knowledge", "handoffs", "users", "insights"].indexOf(b.id),
+        ["chat", "work-center", "tickets", "leave", "expenses", "knowledge", "handoffs", "users", "insights"].indexOf(a.id) -
+        ["chat", "work-center", "tickets", "leave", "expenses", "knowledge", "handoffs", "users", "insights"].indexOf(b.id),
     ),
 );
 function navigate(target: View): void {
   view.value = target;
+  targetId.value = undefined;
+  void refreshSummary();
   sidebarOpen.value = false;
 }
+function openWorkItem(target: WorkTarget): void {
+  const destinations: Record<WorkKind, View> = { leave: "leave", expense: "expenses", ticket: "tickets", handoff: "handoffs" };
+  navigate(destinations[target.kind]);
+  targetId.value = target.record_id;
+}
 async function loggedIn(profile: User): Promise<void> {
+  summaryVersion++;
   user.value = profile;
   view.value = "chat";
   pageError.value = "";
   resetChat();
+  targetId.value = undefined;
+  workSummary.value = { todo_count: 0, unread_count: 0 };
+  void refreshSummary();
   try {
     await refreshConversations();
     const latest = conversations.value[0];
@@ -138,6 +181,10 @@ async function logout(): Promise<void> {
   }
 }
 function expire(): void {
+  summaryVersion++;
+  workSummary.value = { todo_count: 0, unread_count: 0 };
+  targetId.value = undefined;
+  sidebarOpen.value = false;
   user.value = null;
   resetChat();
 }
@@ -152,6 +199,7 @@ async function choose(id: string): Promise<void> {
 async function refreshProfile(): Promise<void> {
   try {
     user.value = await api<User>("/auth/me");
+    void refreshSummary();
   } catch (err) {
     pageError.value = errorText(err);
   }
@@ -165,6 +213,9 @@ const levelNames: Record<string, string> = {
 };
 onMounted(async (): Promise<void> => {
   window.addEventListener("session-expired", expire);
+  window.addEventListener("focus", refreshSummary);
+  document.addEventListener("visibilitychange", refreshSummary);
+  summaryTimer = setInterval(refreshSummary, 30000);
   try {
     await loggedIn(await api<User>("/auth/me"));
   } catch {
@@ -173,7 +224,12 @@ onMounted(async (): Promise<void> => {
     ready.value = true;
   }
 });
-onUnmounted(() => window.removeEventListener("session-expired", expire));
+onUnmounted((): void => {
+  window.removeEventListener("session-expired", expire);
+  window.removeEventListener("focus", refreshSummary);
+  document.removeEventListener("visibilitychange", refreshSummary);
+  if (summaryTimer) clearInterval(summaryTimer);
+});
 </script>
 
 <template>
@@ -211,8 +267,7 @@ onUnmounted(() => window.removeEventListener("session-expired", expire));
           :class="{ active: view === item.id }"
           @click="navigate(item.id)"
         >
-          <component :is="item.icon" :size="18" /><span>{{ item.label }}</span
-          ><ChevronRight v-if="view === item.id" :size="14" />
+          <component :is="item.icon" :size="18" /><span>{{ item.label }}<small v-if="item.id === 'work-center'" class="work-center-counts" :aria-label="`${workSummary.todo_count} 项待办，${workSummary.unread_count} 条未读通知`">待办 {{ workSummary.todo_count }} · 未读 {{ workSummary.unread_count }}</small></span><ChevronRight v-if="view === item.id" :size="14" />
         </button>
       </nav>
       <div class="history-section">
@@ -284,8 +339,12 @@ onUnmounted(() => window.removeEventListener("session-expired", expire));
       </header>
       <p v-if="pageError" class="notice error" role="alert">{{ pageError }}</p>
       <ChatView v-if="view === 'chat'" :user="user" />
+      <WorkCenterView v-else-if="view === 'work-center'" :key="user.username" @open="openWorkItem" @changed="refreshSummary" />
       <KnowledgeView v-else-if="view === 'knowledge'" :user="user" />
-      <HandoffView v-else-if="view === 'handoffs'" />
+      <TicketsView v-else-if="view === 'tickets'" :user="user" :initial-id="targetId" />
+      <LeaveView v-else-if="view === 'leave'" :user="user" :initial-id="targetId" />
+      <ExpensesView v-else-if="view === 'expenses'" :user="user" :initial-id="targetId" />
+      <HandoffView v-else-if="view === 'handoffs'" :user="user" :initial-id="targetId" @changed="refreshSummary" />
       <InsightsView v-else-if="view === 'insights'" />
       <UsersView v-else-if="view === 'users'" @saved="refreshProfile" />
       <section v-else class="page-content">
@@ -322,3 +381,7 @@ onUnmounted(() => window.removeEventListener("session-expired", expire));
     </main>
   </div>
 </template>
+
+<style scoped>
+.work-center-counts { display: block; margin-top: 3px; font-size: 11px; color: inherit; opacity: .8; font-weight: 400; }
+</style>

@@ -32,6 +32,7 @@ export interface Conversation {
   updated_at: string;
 }
 export interface ChatTurn {
+  confirmation: string;
   id: number;
   question: string;
   answer: string;
@@ -54,6 +55,7 @@ export interface AccessOptions extends OrganizationOptions {
   users: { username: string; display_name: string }[];
 }
 export interface KnowledgeFile {
+  index_status: "pending" | "processing" | "failed" | "ready";
   access_mode: AccessPolicy["mode"];
   can_read: boolean;
   can_manage: boolean;
@@ -64,7 +66,27 @@ export interface KnowledgeFile {
   chunks: number;
   created_at: string;
 }
+export interface KnowledgeJob {
+  id: string;
+  document_id: number;
+  kind: "import" | "reindex";
+  status: "queued" | "running" | "succeeded" | "failed";
+  stage: string;
+  processed_chunks: number;
+  total_chunks: number;
+  attempts: number;
+  error: string;
+  created_at: string;
+  updated_at: string;
+  can_retry: boolean;
+  title?: string;
+}
 export interface Handoff {
+  status: "pending" | "resolved";
+  reply: string;
+  resolved_at: string | null;
+  resolved_by: string | null;
+  read_at: string | null;
   id: number;
   created_by: string;
   question: string;
@@ -83,4 +105,54 @@ export interface Usage {
   outcome: string;
   count: number;
   average_ms: number;
+}
+
+export interface ExpenseStep {
+  id: number;
+  round: number;
+  position: number;
+  approver: string;
+  status: "pending" | "waiting" | "approved" | "rejected" | "superseded";
+  comment: string;
+  reviewed_at: string | null;
+}
+export interface Expense {
+  id: number;
+  created_by: string;
+  amount: string;
+  description: string;
+  status: "pending" | "approved" | "rejected";
+  created_at: string;
+  approval_round: number;
+  routing_issue: string;
+  current_approver: string | null;
+  can_review: boolean;
+  can_reassign: boolean;
+  steps: ExpenseStep[];
+}
+
+export interface TicketEvent {
+  id: number;
+  actor: string;
+  action: "claim" | "resolve" | "confirm" | "reopen";
+  comment: string;
+  created_at: string;
+}
+
+export interface Ticket {
+  id: number;
+  created_by: string;
+  description: string;
+  status: "open" | "in_progress" | "awaiting_confirmation" | "closed";
+  status_label: string;
+  created_at: string;
+  assigned_to: string | null;
+  resolution: string;
+  version: number;
+  updated_at: string | null;
+  can_claim: boolean;
+  can_resolve: boolean;
+  can_confirm: boolean;
+  can_reopen: boolean;
+  events?: TicketEvent[];
 }

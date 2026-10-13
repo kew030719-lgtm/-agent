@@ -1,3 +1,4 @@
+import re
 from collections.abc import Callable
 from typing import NotRequired, TypedDict
 
@@ -6,6 +7,12 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from app.agent.router import DOMAINS
+from app.agent.operation_dialogue import (
+    CANCEL, CONFIRM, OperationKind, OperationUpdate, answer_operation, read_draft,
+)
+from app.agent.leave_dialogue import (
+    LEAVE_CANCEL, LEAVE_CONFIRM, LeaveUpdate, answer_leave, read_leave_draft,
+)
 from app.agent.meeting_dialogue import MeetingRequest, answer_meeting
 from app.agent.profile import local_profile_domain, profile_answer
 from app.auth import User
@@ -18,19 +25,19 @@ class AssistantInput(TypedDict):
     pending_ticket: NotRequired[str]
     meeting_context: NotRequired[str]
     pending_handoff: NotRequired[str]
+    operation_context: NotRequired[str]
 
 
 class AssistantState(AssistantInput, total=False):
     domain: str
     answer: str
     meeting_request: dict[str, object] | None
+    operation_update: dict[str, object] | None
+    leave_update: dict[str, object] | None
+    confirmation: str
 
 
 HANDOFF_WORDS = frozenset({"转人工", "确认转人工", "帮我转人工", "请转人工", "联系人工", "人工客服"})
-
-
-CONFIRM_WORDS = frozenset({"确认", "确认报修", "需要", "要"})
-CANCEL_WORDS = frozenset({"取消", "取消报修", "不用了"})
 
 
 def select_domain(state: AssistantState) -> str:
@@ -94,16 +101,16 @@ def availability_request(question: str) -> tuple[int, str, str] | None:
     return None
 
 def is_own_leave_query(question: str) -> bool:
-    text = question.strip()
-    return ("我的" in text or "本人" in text) and "假" in text and "余额" in text
+    text = question.strip().rstrip("？?。！! ")
+    return re.fullmatch(r"(?:查询|查看|查一下|看看|查)?(?:我的|本人)(?:年假|请假|假期)余额(?:还剩多少|是多少|有多少|多少)?", text) is not None
 
 
 def build_graph(
     route_fn: Callable[[str], str],
-    create_ticket_fn: Callable[[User, str], int],
+    create_ticket_fn: Callable[..., int],
     get_leave_balance_fn: Callable[[User], float | None],
     create_handoff_fn: Callable[[User, str, str], int],
-    create_expense_fn: Callable[[User, str, str], int],
+    create_expense_fn: Callable[..., int],
     list_rooms_fn: Callable[[User, int], list[MeetingRoom]],
     list_available_rooms_fn: Callable[
             [User, int, str, str], list[MeetingRoom]
@@ -111,6 +118,15 @@ def build_graph(
     answer_knowledge_fn: Callable[[User, str], str | None] | None = None,
     interpret_meeting_fn: Callable[[str, str], MeetingRequest] | None = None,
     book_room_fn: Callable[[User, int, str, str, int], int] | None = None,
+    interpret_operation_fn: Callable[[str, str, OperationKind | None], OperationUpdate] | None = None,
+    query_ticket_fn: Callable[[User, int | None], str] | None = None,
+    interpret_leave_fn: Callable[[str, str], LeaveUpdate] | None = None,
+    preview_leave_fn: Callable[..., dict[str, object]] | None = None,
+    create_leave_fn: Callable[..., int] | None = None,
+    query_leave_fn: Callable[[User, int | None], str] | None = None,
+    leave_balance_fn: Callable[[User], dict[str, object]] | None = None,
+    query_todos_fn: Callable[[User], str] | None = None,
+    query_notifications_fn: Callable[[User], str] | None = None,
 ) -> CompiledStateGraph:
     def choose_route(state: AssistantState) -> dict[str, object]:
         text = state["question"].strip()
@@ -123,12 +139,38 @@ def build_graph(
         if profile_domain is not None:
             return {"domain": profile_domain, "pending_ticket": ""}
 
-        if pending and text in CONFIRM_WORDS | CANCEL_WORDS:
-            return {"domain": "it"}
-        if ticket_description(text) is not None:
-            return {"domain": "it", "pending_ticket": ""}
+        query = text.rstrip("？?。！! ")
+        if query in {"我的待办", "查看我的待办", "我还有哪些待办", "我有哪些待办", "待我处理的事项"}:
+            return {"domain": "todos"}
+        if query in {"我的通知", "未读通知", "我的未读通知", "有哪些未读通知", "哪些申请有新结果", "我的申请有哪些新结果"}:
+            return {"domain": "notifications"}
+
+        command = text.rstrip("。！!")
+        leave_draft = read_leave_draft(state.get("operation_context", ""))
         if is_own_leave_query(text):
-            return {"domain": "hr", "pending_ticket": ""}
+            return {"domain": "hr", "leave_update": LeaveUpdate(mode="balance").model_dump()}
+        if command in {"确认请假", "确认年假"} or (leave_draft and command in LEAVE_CONFIRM | LEAVE_CANCEL):
+            return {"domain": "hr"}
+        if leave_draft and interpret_leave_fn is not None:
+            update = interpret_leave_fn(text, state.get("operation_context", ""))
+            if update.mode != "other":
+                return {"domain": "hr", "leave_update": update.model_dump()}
+
+        draft = read_draft(state.get("operation_context", ""))
+        if draft and command in CONFIRM | CANCEL:
+            return {"domain": "it" if draft.kind == "ticket" else "finance"}
+        if pending and command in CONFIRM | CANCEL:
+            # 旧版本未展示故障摘要的待办必须先展示，不能直接执行。
+            return {"domain": "it", "operation_context": "", "operation_update": OperationUpdate(kind="ticket", description=pending).model_dump()}
+        if command in {"确认报修", "确认报销"}:
+            return {"domain": "it" if command == "确认报修" else "finance"}
+        if ticket_description(text) is not None:
+            return {"domain": "it", "operation_update": OperationUpdate(kind="ticket", description=ticket_description(text)).model_dump()}
+        if draft and interpret_operation_fn is not None:
+            update = interpret_operation_fn(text, state["operation_context"], None)
+            if update.mode != "other":
+                kind = update.kind or draft.kind
+                return {"domain": "it" if kind == "ticket" else "finance", "operation_update": update.model_dump()}
         if expense_body(text) is not None:
             return {"domain": "finance", "pending_ticket": ""}
         if (
@@ -152,6 +194,16 @@ def build_graph(
     def route_node(state: AssistantState) -> dict[str, object]:
         result = choose_route(state)
         result.setdefault("meeting_request", None)
+        result.setdefault("operation_update", None)
+        result.setdefault("leave_update", None)
+        result["confirmation"] = ""
+        if result["domain"] not in {"it", "finance", "hr"}:
+            result["operation_context"] = ""
+            result["pending_ticket"] = ""
+        # 请假和报销/报修共用持久化草稿字段，但不能相互继承确认状态。
+        leave_draft = read_leave_draft(state.get("operation_context", ""))
+        if (result["domain"] == "hr" and not leave_draft) or (result["domain"] in {"it", "finance"} and leave_draft):
+            result["operation_context"] = ""
         if result["domain"] != "human":
             result["pending_handoff"] = ""
         if result["domain"] != "meeting":
@@ -161,38 +213,46 @@ def build_graph(
     def profile_node(state: AssistantState) -> dict[str, str]:
         return {"answer": profile_answer(state["user"], state["domain"])}
 
-    def submit_ticket(user: User, description: str) -> dict[str, str]:
-        try:
-            ticket_id = create_ticket_fn(user, description)
-        except (PermissionError, ValueError) as exc:
-            return {"answer": str(exc), "pending_ticket": ""}
+    def work_center_node(state: AssistantState) -> dict[str, str]:
+        query_fn = query_todos_fn if state["domain"] == "todos" else query_notifications_fn
+        if query_fn is None:
+            return {"answer": "待办与通知查询暂未配置，请在对应业务页面查看。"}
+        return {"answer": query_fn(state["user"])}
 
-        return {
-            "answer": f"IT 工单 #{ticket_id} 已创建。",
-            "pending_ticket": "",
-        }
+    def operation_node(state: AssistantState, kind: OperationKind) -> dict[str, str]:
+        text = state["question"].strip()
+        context = state.get("operation_context", "")
+        parsed = state.get("operation_update")
+        update = OperationUpdate.model_validate(parsed) if parsed is not None else None
+        if update is None and text.rstrip("。！!") not in CONFIRM | CANCEL:
+            if interpret_operation_fn is not None:
+                update = interpret_operation_fn(text, context, kind)
+            elif kind == "expense":
+                amount, separator, description = (expense_body(text) or "").partition("；事由：")
+                update = OperationUpdate(kind=kind, amount=amount if separator else None, description=description if separator else None)
+            else:
+                update = OperationUpdate(kind=kind, description=ticket_description(text) or text)
+        if update is not None and update.mode == "other":
+            return {"answer": "你想了解流程，还是提交申请？请说明要办理的事情。", "operation_context": "", "confirmation": ""}
+        if update is not None and update.mode == "query":
+            answer = query_ticket_fn(state["user"], update.ticket_id) if query_ticket_fn and update.kind == "ticket" else "请到对应业务页面查看申请进度。"
+            return {"answer": answer, "operation_context": "", "confirmation": "", "pending_ticket": ""}
+        # 迁移旧待报修状态时先展示摘要。
+        effective = "补充故障" if parsed is not None and state.get("pending_ticket") and not context and text.rstrip("。！!") in CONFIRM else text
+        return answer_operation(effective, context, kind, state["user"], update, create_ticket_fn, create_expense_fn)
 
     def it_node(state: AssistantState) -> dict[str, str]:
-        text = state["question"].strip()
-        pending = state.get("pending_ticket", "")
-
-        if pending and text in CANCEL_WORDS:
-            return {"answer": "已取消报修。", "pending_ticket": ""}
-        if pending and text in CONFIRM_WORDS:
-            return submit_ticket(state["user"], pending)
-
-        description = ticket_description(text)
-        if description is not None:
-            if not description:
-                return {"answer": "请在“报修：”后面填写具体问题。"}
-            return submit_ticket(state["user"], description)
-
-        return {
-            "answer": "需要我为你创建 IT 工单吗？回复“确认报修”或“取消”。",
-            "pending_ticket": text,
-        }
+        return operation_node(state, "ticket")
 
     def hr_node(state: AssistantState) -> dict[str, str]:
+        if all(fn is not None for fn in (interpret_leave_fn, preview_leave_fn, create_leave_fn, query_leave_fn, leave_balance_fn)):
+            text = state["question"].strip()
+            context = state.get("operation_context", "")
+            parsed = state.get("leave_update")
+            update = LeaveUpdate.model_validate(parsed) if parsed is not None else None
+            if update is None and text.rstrip("。！!") not in LEAVE_CONFIRM | LEAVE_CANCEL:
+                update = interpret_leave_fn(text, context)
+            return answer_leave(text, context, state["user"], update, preview_leave_fn, create_leave_fn, query_leave_fn, leave_balance_fn)
         if not is_own_leave_query(state["question"]):
             return {"answer": "当前只支持查询本人余额，请输入：我的请假余额"}
 
@@ -202,13 +262,9 @@ def build_graph(
             return {"answer": str(exc)}
 
         if balance is None:
-            handoff_id = create_handoff_fn(
-                state["user"],
-                state["question"],
-                "请假余额未录入",
-            )
             return {
-                "answer": f"当前账号尚未录入请假余额，已转人工，待办 #{handoff_id} 已创建。"
+                "answer": "当前账号尚未录入请假余额。需要人工核对的话，请回复“转人工”。",
+                "pending_handoff": state["question"] + "（当前账号尚未录入请假余额）",
             }
 
         return {"answer": f"当前登录账号的请假余额：{balance:g} 天。"}
@@ -234,29 +290,13 @@ def build_graph(
             explicit = True
         if explicit and pending:
             handoff_id = create_handoff_fn(state["user"], pending, "用户明确请求人工协助")
-            return {"answer": f"已转人工，待办 #{handoff_id} 已创建。", "pending_handoff": ""}
+            return {"answer": f"已转人工，待办 #{handoff_id} 已创建。可到“人工协助 → 我的事项”查看进度和回复。", "pending_handoff": ""}
         if explicit:
             return {"domain": "clarify", "answer": "请说明需要人工处理的问题，例如：转人工：需要确认某产品的交付负责人。", "pending_handoff": ""}
         return {"domain": "clarify", "answer": "请补充要查询的对象或需要办理的事情。如果需要人工协助，请回复“转人工”。", "pending_handoff": text}
 
     def finance_node(state: AssistantState) -> dict[str, str]:
-        body = expense_body(state["question"])
-        usage = "请按格式输入：报销：125.50；事由：客户拜访交通费"
-        if body is None:
-            return {"answer": usage}
-
-        amount, separator, description = body.partition("；事由：")
-        if not separator or not amount.strip() or not description.strip():
-            return {"answer": usage}
-
-        try:
-            request_id = create_expense_fn(
-                state["user"], amount.strip(), description.strip()
-            )
-        except (PermissionError, ValueError) as exc:
-            return {"answer": str(exc)}
-
-        return {"answer": f"报销申请 #{request_id} 已提交，等待审核。"}
+        return operation_node(state, "expense")
 
     def meeting_node(state: AssistantState) -> dict[str, str]:
         text = state["question"].strip()
@@ -329,6 +369,8 @@ def build_graph(
     builder.add_node("human", human_node)
     builder.add_node("identity", profile_node)
     builder.add_node("permissions", profile_node)
+    builder.add_node("todos", work_center_node)
+    builder.add_node("notifications", work_center_node)
 
     builder.add_edge(START, "route")
     builder.add_conditional_edges(

@@ -4,13 +4,13 @@ import sqlite3
 import sys
 import traceback
 from contextlib import closing
+from functools import partial
 from pathlib import Path
 from time import perf_counter
 from uuid import uuid4
 from zipfile import BadZipFile
 
 from app.auth import (
-    DB_PATH,
     ROLE_PERMISSIONS,
     User,
     authenticate,
@@ -20,19 +20,21 @@ from app.auth import (
     has_permission,
 )
 from app.cli_input import read_input
-from app.config import load_config
+from app.config import configured_database_path, load_config, model_data_root
 from app.errors import ServiceUnavailableError
+from app.ingestion.jobs import JobConflictError, create_reindex_job, ensure_ingestion_schema, publish_job
 
 from openai import OpenAI, OpenAIError
 from pymilvus.exceptions import MilvusException
 
 from app.agent.graph import AssistantInput, build_graph
+from app.agent.operation_dialogue import OperationKind, OperationUpdate, interpret_operation
 from app.agent.meeting_dialogue import MeetingRequest, interpret_meeting
 from app.agent.router import route_question
 from app.tools.meeting import book_meeting_room
 from app.knowledge.answer import answer_from_knowledge
 from app.knowledge.documents import add_knowledge_file, ensure_knowledge_schema
-from app.knowledge.embeddings import LocalEmbedder, index_document, index_missing
+from app.knowledge.embeddings import LocalEmbedder, index_document
 from app.knowledge.lifecycle import delete_knowledge_document, replace_knowledge_file
 from app.knowledge.feedback import (
     ensure_feedback_schema,
@@ -48,7 +50,10 @@ from app.knowledge.reranker import LocalReranker
 from app.knowledge.query import expand_followup, is_followup
 from app.knowledge.vector_store import MilvusVectorStore
 
+from app.tools.ticket_workflow import query_own_tickets
 from app.tools.it import create_it_ticket, ensure_it_schema
+from app.agent.leave_dialogue import interpret_leave
+from app.tools.leave_workflow import create_leave_request, preview_leave, query_own_leaves, leave_balance_summary
 from app.tools.leave import (
     ensure_leave_schema,
     get_own_leave_balance,
@@ -61,6 +66,8 @@ from app.tools.handoff import (
     resolve_handoff,
 )
 from app.tools.expense import create_expense_request, ensure_expense_schema
+from app.tools.notifications import backfill_notifications, query_notifications
+from app.tools.work_center import query_todos
 from app.tools.meeting import (
     MeetingRoom,
     add_meeting_room,
@@ -69,6 +76,14 @@ from app.tools.meeting import (
     add_meeting_booking,
     list_available_meeting_rooms,
 )
+
+def _database_root(db: sqlite3.Connection) -> Path:
+    """从实际连接推导文件根；内存连接仅用于测试时回退配置。"""
+    for _sequence, name, filename in db.execute("PRAGMA database_list"):
+        if name == "main" and filename:
+            return Path(filename).resolve().parent
+    return configured_database_path().parent
+
 
 def prompt_login(db: sqlite3.Connection) -> User | None:
     username = read_input("账号：").strip()
@@ -161,8 +176,9 @@ def resolve_handoff_cli(db: sqlite3.Connection) -> None:
         return
 
     ensure_handoff_schema(db)
-    if resolve_handoff(db, actor, handoff_id):
-        print(f"待办 #{handoff_id} 已标记为处理完成")
+    reply = read_input("给员工的处理回复（必填）：").strip()
+    if resolve_handoff(db, actor, handoff_id, reply):
+        print(f"待办 #{handoff_id} 已回复并处理完成")
     else:
         print("待办不存在或已处理完成")
 
@@ -222,11 +238,11 @@ def add_knowledge_cli(db: sqlite3.Connection) -> None:
         return
     path = Path(read_input("文件路径：").strip()).expanduser()
     scope = read_input("可见范围（general/hr/it/finance）：").strip()
-    document_id = add_knowledge_file(db, actor, path, scope, DB_PATH.parent)
+    document_id = add_knowledge_file(db, actor, path, scope, _database_root(db))
     try:
         with MilvusVectorStore() as store:
             count = index_document(
-                db, document_id, LocalEmbedder(DB_PATH.parent), store
+                db, document_id, LocalEmbedder(model_data_root(_database_root(db))), store
             )
     except ValueError as exc:
         print(f"文件 #{document_id} 已导入，但切片无法索引：{exc}")
@@ -240,13 +256,13 @@ def add_knowledge_cli(db: sqlite3.Connection) -> None:
 
 
 def prepare_model_cli() -> None:
-    embedder = LocalEmbedder(DB_PATH.parent, download=True)
+    embedder = LocalEmbedder(model_data_root(configured_database_path().parent), download=True)
     embedder.embed(["知识库模型准备完成"])
     print("本地中文向量模型已准备好")
 
 
 def prepare_reranker_cli() -> None:
-    reranker = LocalReranker(DB_PATH.parent, download=True)
+    reranker = LocalReranker(model_data_root(configured_database_path().parent), download=True)
     reranker.scores("请假制度", ["员工请假制度说明"])
     print("本地重排模型已准备好")
 
@@ -263,8 +279,8 @@ def update_knowledge_cli(db: sqlite3.Connection) -> None:
     path = Path(read_input("新版文件路径：").strip()).expanduser()
     with MilvusVectorStore() as store:
         new_id, count = replace_knowledge_file(
-            db, actor, document_id, path, DB_PATH.parent,
-            LocalEmbedder(DB_PATH.parent), store,
+            db, actor, document_id, path, _database_root(db),
+            LocalEmbedder(model_data_root(_database_root(db))), store,
         )
     print(f"知识文件 #{document_id} 已替换为 #{new_id}，已索引 {count} 个切片")
 
@@ -279,7 +295,7 @@ def delete_knowledge_cli(db: sqlite3.Connection) -> None:
         return
     document_id = int(read_input("要删除的知识文件编号：").strip())
     with MilvusVectorStore() as store:
-        delete_knowledge_document(db, actor, document_id, DB_PATH.parent, store)
+        delete_knowledge_document(db, actor, document_id, _database_root(db), store)
     print(f"知识文件 #{document_id} 及其向量已删除")
 
 
@@ -292,9 +308,26 @@ def reindex_knowledge_cli(db: sqlite3.Connection) -> None:
         print("当前账号无权维护知识索引")
         return
     ensure_knowledge_schema(db)
-    with MilvusVectorStore() as store:
-        count = index_missing(db, LocalEmbedder(DB_PATH.parent), store)
-    print(f"已补建 {count} 个向量切片")
+    ensure_ingestion_schema(db)
+    db.commit()
+    document_ids = [row[0] for row in db.execute(
+        "SELECT d.id FROM knowledge_documents d WHERE d.created_by=? AND "
+        "EXISTS(SELECT 1 FROM knowledge_chunks c WHERE c.document_id=d.id) ORDER BY d.id",
+        (actor["username"],),
+    )]
+    if not document_ids:
+        print("当前账号没有可重建的自有知识文档")
+        return
+    for document_id in document_ids:
+        try:
+            job = create_reindex_job(db, actor, document_id, str(uuid4()))
+        except JobConflictError as exc:
+            print(f"文档 #{document_id} 暂未提交：{exc}")
+            continue
+        delivered = publish_job(db, str(job["id"]))
+        print(f"文档 #{document_id} 的后台重建任务已保存：{job['id']}")
+        if not delivered:
+            print("队列投递未完成，请在知识库建库任务中查看状态并重试")
 
 
 def knowledge_feedback_cli(db: sqlite3.Connection) -> None:
@@ -350,6 +383,7 @@ def run_cli(db: sqlite3.Connection) -> None:
     ensure_knowledge_schema(db)
     ensure_feedback_schema(db)
     ensure_usage_schema(db)
+    backfill_notifications(db)
 
     api_key = os.getenv("DEEPSEEK_API_KEY") or getpass.getpass("DeepSeek API Key:")
     if not api_key:
@@ -375,13 +409,13 @@ def run_cli(db: sqlite3.Connection) -> None:
             nonlocal last_knowledge_answer, last_knowledge_question
             try:
                 if embedder is None:
-                    embedder = LocalEmbedder(DB_PATH.parent)
+                    embedder = LocalEmbedder(model_data_root(_database_root(db)))
                 if vector_store is None:
                     vector_store = MilvusVectorStore()
                 if not reranker_checked:
                     reranker_checked = True
                     try:
-                        reranker = LocalReranker(DB_PATH.parent)
+                        reranker = LocalReranker(model_data_root(_database_root(db)))
                     except (RuntimeError, ValueError, OSError):
                         print("本地重排模型未准备，按向量相似度排序")
                 followup = (
@@ -415,8 +449,8 @@ def run_cli(db: sqlite3.Connection) -> None:
             except UnicodeError as exc:
                 raise ServiceUnavailableError("DeepSeek 路由响应解码失败，请重试。") from exc
 
-        def create_ticket(user:User,description:str)->int:
-            return  create_it_ticket(db, user, description)
+        def create_ticket(user: User, description: str, *, request_key: str | None = None) -> int:
+            return create_it_ticket(db, user, description, request_key=request_key)
 
         def get_balance(user: User) -> float | None:
             return get_own_leave_balance(db, user)
@@ -430,8 +464,9 @@ def run_cli(db: sqlite3.Connection) -> None:
             user: User,
             amount: str,
             description: str,
+            *, request_key: str | None = None,
         ) -> int:
-            return create_expense_request(db, user, amount, description)
+            return create_expense_request(db, user, amount, description, request_key=request_key)
         def get_rooms(
             user: User,
             min_capacity: int,
@@ -450,8 +485,14 @@ def run_cli(db: sqlite3.Connection) -> None:
         def parse_meeting(question: str, context: str) -> MeetingRequest:
             return interpret_meeting(client, question, context)
 
+        def parse_operation(question: str, context: str, kind: OperationKind | None) -> OperationUpdate:
+            return interpret_operation(client, question, context, kind)
+
         def book_room(user: User, room_id: int, start_at: str, end_at: str, capacity: int) -> int:
             return book_meeting_room(db, user, room_id, start_at, end_at, capacity)
+
+        def query_tickets(user: User, ticket_id: int | None) -> str:
+            return query_own_tickets(db, user, ticket_id)
 
         graph = build_graph(
             route,
@@ -464,6 +505,12 @@ def run_cli(db: sqlite3.Connection) -> None:
             answer_knowledge,
             parse_meeting,
             book_room,
+            parse_operation,
+            query_tickets,
+            lambda text, context: interpret_leave(client, text, context),
+            partial(preview_leave, db), partial(create_leave_request, db),
+            partial(query_own_leaves, db), partial(leave_balance_summary, db),
+            partial(query_todos, db), partial(query_notifications, db),
         )
 
         config = {"configurable": {"thread_id": uuid4().hex}}
@@ -551,7 +598,7 @@ def main() -> None:
         )
 
     try:
-        with closing(connect()) as db:
+        with closing(connect(configured_database_path())) as db:
             if sys.argv[1] == "init-admin":
                 init_admin_cli(db)
             elif sys.argv[1] == "add-user":

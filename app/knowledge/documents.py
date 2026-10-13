@@ -77,6 +77,9 @@ def ensure_knowledge_schema(db: sqlite3.Connection) -> None:
     for name in ("source_name", "source_format", "source_path", "source_hash"):
         if name not in columns:
             db.execute(f"ALTER TABLE knowledge_documents ADD COLUMN {name} TEXT")
+    if "index_status" not in columns:
+        # 旧同步导入保持原可见性；后台导入必须显式使用 pending。
+        db.execute("ALTER TABLE knowledge_documents ADD COLUMN index_status TEXT NOT NULL DEFAULT 'ready' CHECK(index_status IN ('pending','processing','failed','ready'))")
     db.execute("""
         CREATE TABLE IF NOT EXISTS knowledge_chunks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

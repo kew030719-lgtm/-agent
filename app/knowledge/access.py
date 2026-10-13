@@ -82,7 +82,7 @@ def visible_document_ids(db: sqlite3.Connection, user: User) -> tuple[int, ...]:
     if subject is None:
         return ()
     visible: list[int] = []
-    for document_id, scope, raw in db.execute("SELECT id,scope,access_policy FROM knowledge_documents ORDER BY id"):
+    for document_id, scope, raw in db.execute("SELECT id,scope,access_policy FROM knowledge_documents WHERE index_status='ready' ORDER BY id"):
         try:
             policy = AccessPolicy.model_validate_json(raw)
         except ValueError:
@@ -94,7 +94,7 @@ def visible_document_ids(db: sqlite3.Connection, user: User) -> tuple[int, ...]:
 
 def access_stamp(db: sqlite3.Connection, user: User) -> str:
     """仅用于失效会话中的追问上下文；不缓存权限结果。"""
-    state = [current_subject(db, user), list(db.execute("SELECT id,scope,access_policy FROM knowledge_documents ORDER BY id"))]
+    state = [current_subject(db, user), list(db.execute("SELECT id,scope,access_policy,index_status FROM knowledge_documents ORDER BY id"))]
     # sqlite.Row 不能直接序列化。
     state[1] = [tuple(row) for row in state[1]]
     return hashlib.sha256(json.dumps(state, ensure_ascii=False, sort_keys=True).encode()).hexdigest()

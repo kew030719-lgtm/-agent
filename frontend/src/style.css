@@ -1404,3 +1404,21 @@ td .row-actions .secondary:hover {
     scroll-behavior: auto !important;
   }
 }
+
+
+/* 报销与审批沿用工作台的表格与表单布局。 */
+.expense-description { white-space: pre-wrap; overflow-wrap: anywhere; max-width: 44rem; }
+.expense-amount { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.expense-pagination { margin: 18px 0; }
+.expense-detail { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--line); }
+.expense-history { padding-left: 22px; }
+.expense-history li { margin: 14px 0; line-height: 1.7; }
+.expense-review { display: grid; gap: 12px; max-width: 680px; margin-top: 20px; }
+.expense-review textarea { width: 100%; padding: 12px; resize: vertical; border: 1px solid var(--line); border-radius: 6px; font: inherit; }
+
+.handoff-filter { margin: 18px 0; }
+.handoff-detail { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--line); }
+.handoff-copy { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; }
+.handoff-reply-form { display: grid; gap: 12px; max-width: 720px; }
+.handoff-reply-form textarea { width: 100%; padding: 12px; border: 1px solid var(--line); border-radius: 6px; font: inherit; resize: vertical; }
+.handoff-unread { padding: 2px 7px; border-radius: 10px; background: #dae5fa; color: #254b94; font-size: 12px; }

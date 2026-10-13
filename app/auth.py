@@ -12,25 +12,25 @@ DB_PATH = Path(__file__).resolve().parents[1] / "data" / "employee_assistant.db"
 
 ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
     "employee": frozenset({
-        "kb:general", "leave:read_self", "ticket:create",
+        "kb:general", "leave:read_self", "leave:create", "ticket:create",
         "expense:create", "meeting:read", "meeting:book",
     }),
     "hr": frozenset({
-        "kb:general", "kb:hr", "leave:read_self", "leave:read_all",
+        "kb:general", "kb:hr", "leave:read_self", "leave:create", "leave:read_all",
         "ticket:create", "expense:create", "meeting:read", "meeting:book", "leave:write_all",
     }),
     "it": frozenset({
-        "kb:general", "kb:it", "leave:read_self", "ticket:create",
-        "ticket:read_all", "expense:create", "meeting:read", "meeting:book",
+        "kb:general", "kb:it", "leave:read_self", "leave:create", "ticket:create",
+        "ticket:read_all", "ticket:manage", "expense:create", "meeting:read", "meeting:book",
     }),
     "finance": frozenset({
-        "kb:general", "kb:finance", "leave:read_self", "ticket:create",
+        "kb:general", "kb:finance", "leave:read_self", "leave:create", "ticket:create",
         "expense:create", "expense:read_all", "meeting:read", "meeting:book",
     }),
     "admin": frozenset({
         "user:create", "kb:general", "kb:hr", "kb:it", "kb:finance",
-        "leave:read_self", "leave:read_all", "ticket:create",
-        "ticket:read_all", "expense:create", "expense:read_all",
+        "leave:read_self", "leave:create", "leave:read_all", "ticket:create",
+        "ticket:read_all", "ticket:manage", "expense:create", "expense:read_all",
         "meeting:read", "meeting:book", "leave:write_all","handoff:manage","meeting:write","kb:write",
     }),
 }

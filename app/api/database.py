@@ -8,6 +8,8 @@ from app.tools.handoff import ensure_handoff_schema
 from app.tools.it import ensure_it_schema
 from app.tools.leave import ensure_leave_schema
 from app.tools.meeting import ensure_meeting_schema
+from app.tools.notifications import backfill_notifications
+from app.ingestion.jobs import ensure_ingestion_schema
 
 
 def initialize(db: sqlite3.Connection) -> None:
@@ -65,3 +67,12 @@ def initialize(db: sqlite3.Connection) -> None:
     if "dialogue_context" not in columns:
         db.execute("ALTER TABLE conversations ADD COLUMN dialogue_context TEXT NOT NULL DEFAULT ''")
         db.commit()
+
+    if "operation_context" not in columns:
+        db.execute("ALTER TABLE conversations ADD COLUMN operation_context TEXT NOT NULL DEFAULT ''")
+    if "confirmation" not in turn_columns:
+        db.execute("ALTER TABLE chat_turns ADD COLUMN confirmation TEXT NOT NULL DEFAULT ''")
+    db.commit()
+    backfill_notifications(db)
+    ensure_ingestion_schema(db)
+    db.commit()

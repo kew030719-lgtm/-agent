@@ -25,7 +25,7 @@ class DialogueContext(BaseModel):
 
 class QuestionPlan(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    domain: Literal["knowledge", "hr", "it", "finance", "meeting", "human", "identity", "permissions"] = "human"
+    domain: Literal["knowledge", "hr", "it", "finance", "meeting", "human", "identity", "permissions", "todos", "notifications"] = "human"
     confidence: float = Field(default=0, ge=0, le=1)
     needs_human: bool = False
     followup: bool = False
@@ -49,6 +49,7 @@ CONTEXT_PROMPT = ROUTER_PROMPT + """
 company 只选当前问题指向且在已登记公司列表中的完整名称；泛指本公司时可留空。用户明确问其他公司且目录没有时澄清目录范围，不冒充全公司总数。
 若产品目录问题带有未支持的筛选（如去年上线、已下架、某人的产品），使用 search，不能丢掉条件统计全部。
 只读交付负责人查询属于 knowledge。信息缺失由检索节点判断，不能直接转人工。
+非knowledge领域（如报修、报销）也必须将knowledge_action填为search，company填空字符串。
 needs_human 仅表示需要人工协助；此标记不会自动创建待办。
 """
 
@@ -65,7 +66,11 @@ def plan_question(client: OpenAI, question: str, context: DialogueContext, title
         )
         if not response.choices:
             raise ServiceUnavailableError("问题理解服务返回空结果，请重试")
-        result = QuestionPlan.model_validate_json(response.choices[0].message.content or "")
+        payload = json.loads(response.choices[0].message.content or "")
+        # 非知识操作没有检索动作，兼容模型把无关字段留空；其他字段继续严格校验。
+        if isinstance(payload, dict) and payload.get("domain") in {"hr", "it", "finance", "meeting", "human", "identity", "permissions", "todos", "notifications"} and payload.get("knowledge_action") in ("", None):
+            payload["knowledge_action"] = "search"
+        result = QuestionPlan.model_validate(payload)
     except OpenAIError as exc:
         raise ServiceUnavailableError("问题理解服务暂时不可用，请稍后重试") from exc
     except ValueError:

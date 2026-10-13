@@ -12,6 +12,7 @@ from openai import OpenAI
 from pymilvus.exceptions import MilvusException
 
 from app.agent.graph import build_graph
+from app.agent.operation_dialogue import interpret_operation
 from app.agent.meeting_dialogue import interpret_meeting
 from app.agent.dialogue import DialogueContext, QuestionPlan, plan_question
 from app.auth import User
@@ -24,7 +25,12 @@ from app.knowledge.reranker import LocalReranker
 from app.knowledge.vector_store import MilvusVectorStore
 from app.tools.expense import create_expense_request
 from app.tools.handoff import create_handoff
+from app.tools.notifications import query_notifications
+from app.tools.work_center import query_todos
+from app.tools.ticket_workflow import query_own_tickets
 from app.tools.it import create_it_ticket
+from app.agent.leave_dialogue import interpret_leave
+from app.tools.leave_workflow import create_leave_request, preview_leave, query_own_leaves, leave_balance_summary
 from app.tools.leave import get_own_leave_balance
 from app.tools.meeting import book_meeting_room, list_available_meeting_rooms, list_meeting_rooms
 
@@ -39,6 +45,8 @@ class TurnResult:
     meeting_context: str = ""
     source_document_ids: tuple[int, ...] = ()
     dialogue_context: str = ""
+    operation_context: str = ""
+    confirmation: str = ""
 
 
 class AssistantService:
@@ -81,7 +89,7 @@ class AssistantService:
     def respond(
         self, db: sqlite3.Connection, user: User, question: str,
         pending_ticket: str = "", previous_question: str = "",
-        meeting_context: str = "", dialogue_context: str = "",
+        meeting_context: str = "", dialogue_context: str = "", operation_context: str = "",
     ) -> TurnResult:
         client: OpenAI | None = None
         knowledge_answer: str | None = None
@@ -152,10 +160,16 @@ class AssistantService:
             answer_knowledge,
             lambda text, context: interpret_meeting(get_client(), text, context),
             partial(book_meeting_room, db),
+            lambda text, context, kind: interpret_operation(get_client(), text, context, kind),
+            partial(query_own_tickets, db),
+            lambda text, context: interpret_leave(get_client(), text, context),
+            partial(preview_leave, db), partial(create_leave_request, db),
+            partial(query_own_leaves, db), partial(leave_balance_summary, db),
+            partial(query_todos, db), partial(query_notifications, db),
         )
         try:
             result = graph.invoke(
-                {"user": user, "question": question, "pending_ticket": pending_ticket, "meeting_context": meeting_context, "pending_handoff": context.pending_handoff},
+                {"user": user, "question": question, "pending_ticket": pending_ticket, "meeting_context": meeting_context, "pending_handoff": context.pending_handoff, "operation_context": operation_context},
                 config={"configurable": {"thread_id": uuid4().hex}},
             )
             if planned is not None and planned.clarification:
@@ -174,6 +188,8 @@ class AssistantService:
             elif result["domain"] == "clarify":
                 # 模糊追问仍保留上一主题，方便回答“我指第二个”后继续。
                 updated = context.model_copy(update={"pending_handoff": result.get("pending_handoff", ""), "clarification_question": question if planned is not None and planned.clarification else ""}) if context.question else DialogueContext(question=question, topic=question, pending_handoff=result.get("pending_handoff", ""), clarification_question=question if planned is not None and planned.clarification else "")
+            elif result.get("pending_handoff"):
+                updated = DialogueContext(question=question, topic=question, pending_handoff=result["pending_handoff"])
             else:
                 updated = DialogueContext()
             return TurnResult(
@@ -182,6 +198,7 @@ class AssistantService:
                 knowledge_question=anchor, feedback_allowed=knowledge_answer is not None and bool(source_ids),
                 meeting_context=result.get("meeting_context", ""),
                 source_document_ids=tuple(source_ids), dialogue_context=updated.model_dump_json(),
+                operation_context=result.get("operation_context", ""), confirmation=result.get("confirmation", ""),
             )
         finally:
             if client is not None:
